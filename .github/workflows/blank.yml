@@ -1,0 +1,106 @@
+# .github/workflows/openai-logprobs.yml
+name: Test OpenAI logprobs exposure
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-openai-logprobs:
+    runs-on: ubuntu-latest
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: gpt-4o-mini
+
+    steps:
+      - name: Check required secret
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY GitHub Actions secret is missing."
+            echo "Add it under: Settings → Secrets and variables → Actions → New repository secret"
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install OpenAI SDK
+        run: |
+          python -m pip install --upgrade pip
+          pip install openai
+
+      - name: Test OpenAI logprobs exposure
+        run: |
+          python <<'PY'
+          import json
+          import math
+          import os
+          from openai import OpenAI
+
+          api_key = os.environ["OPENAI_API_KEY"]
+          model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+          client = OpenAI(api_key=api_key)
+
+          response = client.chat.completions.create(
+              model=model,
+              messages=[
+                  {
+                      "role": "system",
+                      "content": "Answer with exactly one token if possible. Do not explain.",
+                  },
+                  {
+                      "role": "user",
+                      "content": "Reply with the word: apple",
+                  },
+              ],
+              max_tokens=3,
+              temperature=0,
+              logprobs=True,
+              top_logprobs=5,
+          )
+
+          choice = response.choices[0]
+
+          assert choice.logprobs is not None, "choices[0].logprobs is missing"
+          assert choice.logprobs.content is not None, "logprobs.content is missing"
+          assert len(choice.logprobs.content) > 0, "No token logprobs returned"
+
+          first_token = choice.logprobs.content[0]
+
+          assert first_token.token is not None, "Token text is missing"
+          assert isinstance(first_token.logprob, float), "Token logprob is not a float"
+          assert math.isfinite(first_token.logprob) or first_token.logprob == -9999.0
+
+          assert first_token.top_logprobs is not None, "top_logprobs is missing"
+          assert len(first_token.top_logprobs) > 0, "No top_logprobs returned"
+
+          first_alt = first_token.top_logprobs[0]
+
+          assert first_alt.token is not None, "Top-logprob token text is missing"
+          assert isinstance(first_alt.logprob, float), "Top-logprob value is not a float"
+
+          artifact = {
+              "claim": "OpenAI exposes inference-time token logprobs and top-logprobs when requested.",
+              "model": response.model,
+              "generated_text": choice.message.content,
+              "first_token": {
+                  "token": first_token.token,
+                  "bytes": first_token.bytes,
+                  "logprob": first_token.logprob,
+                  "top_logprobs": [
+                      {
+                          "token": item.token,
+                          "bytes": item.bytes,
+                          "logprob": item.logprob,
+                      }
+                      for item in first_token.top_logprobs
+                  ],
+              },
+          }
+
+          print("OPENAI_LOGPROBS_EXPOSURE_ARTIFACT")
+          print(json.dumps(artifact, indent=2, ensure_ascii=False))
+          PY
