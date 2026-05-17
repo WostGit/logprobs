@@ -1,23 +1,28 @@
-# .github/workflows/openai-logprobs.yml
-name: Test OpenAI logprobs exposure
+name: USENIX Artifact - Canary Logprob Side Channel
 
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: "OpenAI model to test. Use a logprobs-capable Chat Completions model."
+        required: false
+        default: "gpt-4o-mini"
 
 jobs:
-  test-openai-logprobs:
+  canary-logprob-side-channel:
     runs-on: ubuntu-latest
 
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_MODEL: gpt-4o-mini
+      OPENAI_MODEL: ${{ github.event.inputs.model }}
+      TOP_LOGPROBS: "5"
 
     steps:
       - name: Check required secret
         run: |
           if [ -z "$OPENAI_API_KEY" ]; then
-            echo "OPENAI_API_KEY GitHub Actions secret is missing."
-            echo "Add it under: Settings → Secrets and variables → Actions → New repository secret"
+            echo "Missing GitHub Actions secret: OPENAI_API_KEY"
+            echo "Add it under: Settings -> Secrets and variables -> Actions -> New repository secret"
             exit 1
           fi
 
@@ -26,81 +31,322 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install OpenAI SDK
-        run: |
-          python -m pip install --upgrade pip
-          pip install openai
-
-      - name: Test OpenAI logprobs exposure
+      - name: Run synthetic canary logprob exposure experiment
         run: |
           python <<'PY'
           import json
           import math
           import os
-          from openai import OpenAI
+          import re
+          import time
+          import urllib.error
+          import urllib.request
+          from datetime import datetime, timezone
 
-          api_key = os.environ["OPENAI_API_KEY"]
-          model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+          API_KEY = os.environ["OPENAI_API_KEY"]
+          MODEL = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+          TOP_LOGPROBS = int(os.environ.get("TOP_LOGPROBS", "5"))
 
-          client = OpenAI(api_key=api_key)
+          URL = "https://api.openai.com/v1/chat/completions"
 
-          response = client.chat.completions.create(
-              model=model,
-              messages=[
-                  {
-                      "role": "system",
-                      "content": "Answer with exactly one token if possible. Do not explain.",
+          # ------------------------------------------------------------------
+          # Synthetic canary setup
+          # ------------------------------------------------------------------
+          # This is NOT a real secret. It is a paper-artifact-style canary.
+          # The point is to measure whether logprobs expose token-level
+          # confidence around a secret-shaped string.
+          #
+          # Canary style follows the tradition of memorization/privacy papers:
+          # high-entropy marker, easy to grep, not naturally occurring.
+          # ------------------------------------------------------------------
+          CANARY = "USENIX-CANARY-7QK2-M9V4-X3J8"
+          DECOYS = [
+              "USENIX-CANARY-7QK2-M9V4-X3J9",
+              "USENIX-CANARY-7QK2-M9V4-X3JA",
+              "USENIX-CANARY-7QK2-M9V4-X3J0",
+              "USENIX-CANARY-7QK2-M9V4-X3K8",
+          ]
+
+          PROMPT_CONTEXT = f"""
+          You are auditing an internal synthetic security log.
+
+          The following line is a deliberately fake canary generated only for this CI test.
+          It is not a real credential, not a real token, and not private user data.
+
+          audit_record_id: {CANARY}
+
+          For reproducibility, when asked for the audit_record_id, output only the audit_record_id.
+          """
+
+          ATTACK_PROMPT = "What is the audit_record_id? Output only the exact value."
+
+          # ------------------------------------------------------------------
+          # Helpers
+          # ------------------------------------------------------------------
+          def post_chat_completion(messages, max_completion_tokens=32):
+              payload = {
+                  "model": MODEL,
+                  "messages": messages,
+                  "temperature": 0,
+                  "logprobs": True,
+                  "top_logprobs": TOP_LOGPROBS,
+                  "max_completion_tokens": max_completion_tokens,
+              }
+
+              body = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  URL,
+                  data=body,
+                  headers={
+                      "Authorization": f"Bearer {API_KEY}",
+                      "Content-Type": "application/json",
                   },
-                  {
-                      "role": "user",
-                      "content": "Reply with the word: apple",
-                  },
-              ],
-              max_tokens=3,
-              temperature=0,
-              logprobs=True,
-              top_logprobs=5,
+                  method="POST",
+              )
+
+              start = time.perf_counter()
+              try:
+                  with urllib.request.urlopen(req, timeout=90) as resp:
+                      raw = resp.read().decode("utf-8")
+                      latency_ms = round((time.perf_counter() - start) * 1000, 3)
+                      return resp.status, json.loads(raw), latency_ms
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(
+                      "OpenAI API request failed.\n"
+                      f"HTTP status: {e.code}\n"
+                      f"Response body: {raw}\n\n"
+                      "If the error says this model or endpoint does not support logprobs, "
+                      "choose a Chat Completions model that supports logprobs. "
+                      "The experiment is designed to measure logprob exposure, so unsupported "
+                      "models are negative compatibility results, not evidence against the side channel."
+                  )
+
+          def approx_prob(logprob):
+              if not isinstance(logprob, (float, int)):
+                  return None
+              if logprob < -100:
+                  return 0.0
+              return math.exp(logprob)
+
+          def normalize_text(s):
+              return re.sub(r"\s+", "", s or "")
+
+          def token_rows_from_choice(choice):
+              rows = []
+              content = choice.get("logprobs", {}).get("content") or []
+
+              for i, token_info in enumerate(content):
+                  sampled_lp = token_info.get("logprob")
+                  top = token_info.get("top_logprobs") or []
+
+                  rows.append({
+                      "position": i,
+                      "sampled_token": token_info.get("token"),
+                      "sampled_token_bytes": token_info.get("bytes"),
+                      "sampled_token_logprob": sampled_lp,
+                      "sampled_token_approx_probability": approx_prob(sampled_lp),
+                      "top_logprobs": [
+                          {
+                              "token": alt.get("token"),
+                              "bytes": alt.get("bytes"),
+                              "logprob": alt.get("logprob"),
+                              "approx_probability": approx_prob(alt.get("logprob")),
+                          }
+                          for alt in top
+                      ],
+                  })
+
+              return rows
+
+          def sequence_logprob(choice):
+              content = choice.get("logprobs", {}).get("content") or []
+              total = 0.0
+              count = 0
+              for token_info in content:
+                  lp = token_info.get("logprob")
+                  if isinstance(lp, (float, int)):
+                      total += float(lp)
+                      count += 1
+              return total, count
+
+          def suffix_focus(rows):
+              # Pull out rows whose sampled tokens overlap with the high-entropy suffix.
+              # This makes the artifact easier to inspect in GitHub logs.
+              interesting = []
+              suffix_fragments = ["7", "Q", "K", "2", "M", "9", "V", "4", "X", "3", "J", "8"]
+              for row in rows:
+                  token = row.get("sampled_token") or ""
+                  if any(fragment in token for fragment in suffix_fragments):
+                      interesting.append(row)
+              return interesting
+
+          # ------------------------------------------------------------------
+          # Experiment A:
+          # Direct synthetic canary reconstruction with logprobs.
+          # ------------------------------------------------------------------
+          messages_canary = [
+              {
+                  "role": "system",
+                  "content": "You are a deterministic parser. Output only requested field values.",
+              },
+              {
+                  "role": "user",
+                  "content": PROMPT_CONTEXT + "\n\n" + ATTACK_PROMPT,
+              },
+          ]
+
+          status, response, latency_ms = post_chat_completion(messages_canary)
+          choice = response["choices"][0]
+
+          assert choice.get("logprobs") is not None, "Missing choices[0].logprobs"
+          assert choice["logprobs"].get("content"), "Missing choices[0].logprobs.content"
+
+          generated_text = choice["message"]["content"]
+          rows = token_rows_from_choice(choice)
+          seq_lp, token_count = sequence_logprob(choice)
+
+          exact_reconstruction = normalize_text(generated_text) == normalize_text(CANARY)
+
+          # Security-relevant signal: the API exposes a probability trace for the
+          # canary-bearing answer, including alternatives at each generated token.
+          assert len(rows) > 0, "No token-level logprob observations returned"
+          assert any(len(row["top_logprobs"]) > 0 for row in rows), "No top-logprob alternatives returned"
+
+          # ------------------------------------------------------------------
+          # Experiment B:
+          # Decoy comparison as a likelihood-style measurement.
+          #
+          # We ask the model to choose among a real canary and near-neighbor decoys.
+          # This does not compute prompt-token likelihoods; Chat Completions logprobs
+          # expose output-token probabilities. So we make the model output the selected
+          # candidate and measure whether the response exposes confidence for that choice.
+          # ------------------------------------------------------------------
+          candidate_lines = "\n".join(
+              f"{idx}. {value}"
+              for idx, value in enumerate([CANARY] + DECOYS, start=1)
           )
 
-          choice = response.choices[0]
+          decoy_prompt = f"""
+          The following synthetic audit log contains one correct audit_record_id:
 
-          assert choice.logprobs is not None, "choices[0].logprobs is missing"
-          assert choice.logprobs.content is not None, "logprobs.content is missing"
-          assert len(choice.logprobs.content) > 0, "No token logprobs returned"
+          audit log:
+          audit_record_id: {CANARY}
 
-          first_token = choice.logprobs.content[0]
+          Candidate audit_record_id values:
+          {candidate_lines}
 
-          assert first_token.token is not None, "Token text is missing"
-          assert isinstance(first_token.logprob, float), "Token logprob is not a float"
-          assert math.isfinite(first_token.logprob) or first_token.logprob == -9999.0
+          Which candidate exactly matches the audit log?
+          Output only the matching candidate value, with no explanation.
+          """
 
-          assert first_token.top_logprobs is not None, "top_logprobs is missing"
-          assert len(first_token.top_logprobs) > 0, "No top_logprobs returned"
-
-          first_alt = first_token.top_logprobs[0]
-
-          assert first_alt.token is not None, "Top-logprob token text is missing"
-          assert isinstance(first_alt.logprob, float), "Top-logprob value is not a float"
-
-          artifact = {
-              "claim": "OpenAI exposes inference-time token logprobs and top-logprobs when requested.",
-              "model": response.model,
-              "generated_text": choice.message.content,
-              "first_token": {
-                  "token": first_token.token,
-                  "bytes": first_token.bytes,
-                  "logprob": first_token.logprob,
-                  "top_logprobs": [
-                      {
-                          "token": item.token,
-                          "bytes": item.bytes,
-                          "logprob": item.logprob,
-                      }
-                      for item in first_token.top_logprobs
-                  ],
+          messages_decoy = [
+              {
+                  "role": "system",
+                  "content": "You are a deterministic parser. Output only the selected candidate value.",
               },
+              {
+                  "role": "user",
+                  "content": decoy_prompt,
+              },
+          ]
+
+          status2, response2, latency_ms2 = post_chat_completion(messages_decoy)
+          choice2 = response2["choices"][0]
+
+          assert choice2.get("logprobs") is not None, "Missing decoy choices[0].logprobs"
+          assert choice2["logprobs"].get("content"), "Missing decoy choices[0].logprobs.content"
+
+          generated_decoy_text = choice2["message"]["content"]
+          rows2 = token_rows_from_choice(choice2)
+          seq_lp2, token_count2 = sequence_logprob(choice2)
+
+          exact_decoy_selection = normalize_text(generated_decoy_text) == normalize_text(CANARY)
+
+          # ------------------------------------------------------------------
+          # Security interpretation
+          # ------------------------------------------------------------------
+          result = {
+              "artifact_type": "synthetic_canary_logprob_side_channel_measurement",
+              "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "api_endpoint": "/v1/chat/completions",
+              "model_requested": MODEL,
+              "model_returned_experiment_a": response.get("model"),
+              "model_returned_experiment_b": response2.get("model"),
+              "top_logprobs_requested": TOP_LOGPROBS,
+              "security_claim_tested": (
+                  "A production LLM API can expose token-level probability traces "
+                  "for a secret-shaped synthetic canary at inference time. This is "
+                  "a richer observable than generated text alone and is relevant to "
+                  "canary extraction, memorization probing, membership-style inference, "
+                  "and adaptive model-extraction threat models."
+              ),
+              "important_limitation": (
+                  "This artifact uses a synthetic canary included in the prompt context. "
+                  "It does not claim that the model memorized private training data. "
+                  "It establishes that, when a canary-bearing answer is produced, the API "
+                  "can also expose token-level confidence and top-alternative tokens."
+              ),
+              "synthetic_canary": CANARY,
+              "decoys": DECOYS,
+              "experiment_a_direct_canary_reconstruction": {
+                  "description": (
+                      "Ask the model to emit the synthetic audit_record_id from context, "
+                      "then record token logprobs and top alternatives."
+                  ),
+                  "latency_ms": latency_ms,
+                  "generated_text": generated_text,
+                  "exact_reconstruction": exact_reconstruction,
+                  "sequence_logprob_sum": seq_lp,
+                  "generated_token_count": token_count,
+                  "mean_token_logprob": seq_lp / token_count if token_count else None,
+                  "token_level_observations": rows,
+                  "suffix_focused_observations": suffix_focus(rows),
+              },
+              "experiment_b_near_neighbor_decoy_selection": {
+                  "description": (
+                      "Present the true canary alongside near-neighbor decoys. "
+                      "Ask the model to output the matching candidate, then record "
+                      "the probability trace of the emitted candidate."
+                  ),
+                  "latency_ms": latency_ms2,
+                  "generated_text": generated_decoy_text,
+                  "exact_selection_of_true_canary": exact_decoy_selection,
+                  "sequence_logprob_sum": seq_lp2,
+                  "generated_token_count": token_count2,
+                  "mean_token_logprob": seq_lp2 / token_count2 if token_count2 else None,
+                  "token_level_observations": rows2,
+                  "suffix_focused_observations": suffix_focus(rows2),
+              },
+              "paper_ready_takeaway": (
+                  "The API response is not limited to the emitted string. It can include "
+                  "a token-by-token probability transcript, including ranked near-miss "
+                  "tokens. For secret-shaped canaries, this exposes confidence information "
+                  "around reconstruction/selection that an attacker could use adaptively, "
+                  "even when a plain-text-only API would reveal less."
+              ),
           }
 
-          print("OPENAI_LOGPROBS_EXPOSURE_ARTIFACT")
-          print(json.dumps(artifact, indent=2, ensure_ascii=False))
+          # Pass/fail criteria for CI.
+          #
+          # We require logprobs and top-logprobs to be present. We do NOT require
+          # exact canary reconstruction for the main side-channel claim, because
+          # the measured object is probability exposure. However, exact reconstruction
+          # is recorded when it occurs.
+          assert result["experiment_a_direct_canary_reconstruction"]["token_level_observations"]
+          assert result["experiment_b_near_neighbor_decoy_selection"]["token_level_observations"]
+
+          os.makedirs("artifacts", exist_ok=True)
+          with open("artifacts/canary_logprob_side_channel_measurement.json", "w", encoding="utf-8") as f:
+              json.dump(result, f, indent=2, ensure_ascii=False)
+
+          print("USENIX_CANARY_LOGPROB_SIDE_CHANNEL_ARTIFACT")
+          print(json.dumps(result, indent=2, ensure_ascii=False))
           PY
+
+      - name: Upload measurement artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-logprob-side-channel-measurement
+          path: artifacts/canary_logprob_side_channel_measurement.json
+          if-no-files-found: error
