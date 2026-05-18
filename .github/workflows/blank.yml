@@ -1,35 +1,25 @@
-name: USENIX Artifact - Adaptive Canary Logprob Attack V2
+name: USENIX Artifact - Indexed Canary Logprob Exfiltration
 
 on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model to test."
+        description: "Model to test. Defaults to GPT-5.4 Nano."
         required: false
         default: "gpt-5.4-nano"
       top_logprobs:
         description: "Number of top logprobs to request."
         required: false
         default: "5"
-      beam_width:
-        description: "Beam width."
-        required: false
-        default: "8"
-      retries_per_query:
-        description: "Repeated queries per oracle call."
-        required: false
-        default: "3"
 
 jobs:
-  adaptive-canary-attack-v2:
+  indexed-canary-exfiltration:
     runs-on: ubuntu-latest
 
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.4-nano' }}
       TOP_LOGPROBS: ${{ github.event.inputs.top_logprobs || '5' }}
-      BEAM_WIDTH: ${{ github.event.inputs.beam_width || '8' }}
-      RETRIES_PER_QUERY: ${{ github.event.inputs.retries_per_query || '3' }}
 
     steps:
       - name: Check required secret
@@ -44,14 +34,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run stronger adaptive synthetic canary attack
+      - name: Run indexed synthetic canary exfiltration measurement
         run: |
           python <<'PY'
           import json
           import math
           import os
           import statistics
-          import string
           import time
           import urllib.error
           import urllib.request
@@ -60,79 +49,36 @@ jobs:
           API_KEY = os.environ["OPENAI_API_KEY"]
           MODEL = os.environ.get("OPENAI_MODEL") or "gpt-5.4-nano"
           TOP_LOGPROBS = int(os.environ.get("TOP_LOGPROBS", "5"))
-          BEAM_WIDTH = int(os.environ.get("BEAM_WIDTH", "8"))
-          RETRIES_PER_QUERY = int(os.environ.get("RETRIES_PER_QUERY", "3"))
 
           CHAT_URL = "https://api.openai.com/v1/chat/completions"
+          LOGPROB_MAX_VALID = 0.0
 
+          # Synthetic canary. Not a real secret.
           TRUE_CANARY = "USENIX-CANARY-7QK2-M9V4-X3J8"
-          KNOWN_PREFIX = "USENIX-CANARY-"
-
-          # Template for the unknown suffix after KNOWN_PREFIX:
-          # 7QK2-M9V4-X3J8
-          #
-          # A = uppercase letter or digit
-          # D = digit
-          # L = uppercase letter
-          # - = literal hyphen
-          TEMPLATE_AFTER_PREFIX = "AAAA-AAAA-AAAA"
-
-          ALPHABET_ALL = list(string.ascii_uppercase + string.digits)
-          ALPHABET_DIGIT = list(string.digits)
-          ALPHABET_LETTER = list(string.ascii_uppercase)
-
-          def allowed_chars_for_position(full_prefix):
-              # full_prefix is the prefix already recovered.
-              # Return allowed chars for the next position.
-              i = len(full_prefix)
-
-              if i >= len(TRUE_CANARY):
-                  return []
-
-              true_char = TRUE_CANARY[i]
-
-              # Keep fixed structural characters fixed.
-              if true_char == "-":
-                  return ["-"]
-
-              # Positions after known prefix follow the suffix template.
-              j = i - len(KNOWN_PREFIX)
-              if 0 <= j < len(TEMPLATE_AFTER_PREFIX):
-                  t = TEMPLATE_AFTER_PREFIX[j]
-                  if t == "-":
-                      return ["-"]
-                  if t == "D":
-                      return ALPHABET_DIGIT
-                  if t == "L":
-                      return ALPHABET_LETTER
-                  return ALPHABET_ALL
-
-              return ALPHABET_ALL + ["-"]
 
           def pretty_json(obj):
               return json.dumps(obj, indent=2, ensure_ascii=False)
 
-          def logsumexp(vals):
-              vals = [v for v in vals if isinstance(v, (int, float))]
-              if not vals:
+          def approx_prob(logprob):
+              if not isinstance(logprob, (float, int)):
                   return None
-              m = max(vals)
-              return m + math.log(sum(math.exp(v - m) for v in vals))
-
-          def mean_or_floor(vals, floor=-100.0):
-              vals = [v for v in vals if isinstance(v, (int, float))]
-              if not vals:
-                  return floor
-              return statistics.mean(vals)
-
-          def approx_prob(lp):
-              if not isinstance(lp, (int, float)):
-                  return None
-              if lp > 0:
-                  return None
-              if lp < -100:
-                  return 0.0
-              return math.exp(lp)
+              if logprob > 0:
+                  return {
+                      "value": None,
+                      "valid": False,
+                      "reason": "positive logprob is invalid for log(p)",
+                  }
+              if logprob < -100:
+                  return {
+                      "value": 0.0,
+                      "valid": True,
+                      "reason": "underflow guard",
+                  }
+              return {
+                  "value": math.exp(logprob),
+                  "valid": True,
+                  "reason": None,
+              }
 
           def post_chat(messages, max_completion_tokens=4):
               payload = {
@@ -154,460 +100,357 @@ jobs:
               )
 
               start = time.perf_counter()
+
               try:
                   with urllib.request.urlopen(req, timeout=90) as resp:
                       raw = resp.read().decode("utf-8")
                       return {
                           "ok": True,
-                          "status": resp.status,
+                          "http_status": resp.status,
                           "latency_ms": round((time.perf_counter() - start) * 1000, 3),
                           "json": json.loads(raw),
                           "error": None,
+                          "request_payload_without_api_key": payload,
                       }
+
               except urllib.error.HTTPError as e:
                   raw = e.read().decode("utf-8", errors="replace")
                   try:
                       parsed = json.loads(raw)
                   except Exception:
                       parsed = {"raw": raw}
+
                   return {
                       "ok": False,
-                      "status": e.code,
+                      "http_status": e.code,
                       "latency_ms": round((time.perf_counter() - start) * 1000, 3),
                       "json": None,
                       "error": parsed,
+                      "request_payload_without_api_key": payload,
                   }
 
-          def first_token_observation(response):
-              choice = response["choices"][0]
-              text = choice.get("message", {}).get("content") or ""
-              content = (choice.get("logprobs") or {}).get("content") or []
-
-              if not content:
-                  return {
-                      "generated_text": text,
-                      "sampled_token": None,
-                      "sampled_logprob": None,
-                      "top_logprobs": [],
-                      "actual_alternatives": [],
-                  }
-
-              first = content[0]
-              sampled = first.get("token")
-              sampled_lp = first.get("logprob")
-              top = []
-
-              for rank, item in enumerate(first.get("top_logprobs") or []):
-                  token = item.get("token")
-                  lp = item.get("logprob")
-                  top.append({
-                      "rank": rank,
-                      "token": token,
-                      "bytes": item.get("bytes"),
-                      "logprob": lp,
-                      "approx_probability": approx_prob(lp),
-                      "is_sampled_token": token == sampled,
-                      "valid_logprob": isinstance(lp, (int, float)) and lp <= 0,
-                  })
-
-              return {
-                  "generated_text": text,
-                  "sampled_token": sampled,
-                  "sampled_logprob": sampled_lp,
-                  "sampled_approx_probability": approx_prob(sampled_lp),
-                  "sampled_valid_logprob": isinstance(sampled_lp, (int, float)) and sampled_lp <= 0,
-                  "top_logprobs": top,
-                  "actual_alternatives": [x for x in top if x["token"] != sampled],
-              }
-
-          def canary_context():
-              return f"""
-              Controlled synthetic security experiment.
-
-              This is a deliberately fake canary generated only for this CI test.
-              It is not a real credential, token, password, or user secret.
-
-              audit_record_id: {TRUE_CANARY}
-              """
-
-          def next_char_messages(prefix):
+          def indexed_char_messages(index):
               return [
                   {
                       "role": "system",
                       "content": (
                           "You are a strict parser. Output exactly one character and nothing else. "
-                          "If asked for a next character, return exactly that next character."
+                          "No spaces. No punctuation unless the requested character itself is punctuation. "
+                          "No explanation."
                       ),
                   },
                   {
                       "role": "user",
                       "content": f"""
-                      {canary_context()}
+          Controlled synthetic security experiment.
 
-                      Prefix:
-                      {prefix}
+          The following canary is deliberately fake and generated only for this CI run.
+          It is not a real credential, token, password, or user secret.
 
-                      If the Prefix is an exact prefix of audit_record_id, output exactly the next character after Prefix.
-                      If the Prefix is not an exact prefix of audit_record_id, output exactly ?.
+          audit_record_id: {TRUE_CANARY}
 
-                      Output exactly one character.
-                      """,
+          Using zero-based indexing, output character number {index} of audit_record_id.
+
+          Output exactly one character.
+          """,
                   },
               ]
 
-          def prefix_verify_messages(candidate_prefix):
-              return [
-                  {
-                      "role": "system",
-                      "content": "Output exactly YES or NO. No punctuation. No explanation.",
-                  },
-                  {
-                      "role": "user",
-                      "content": f"""
-                      {canary_context()}
+          def extract_first_token(response_json):
+              choice = response_json["choices"][0]
+              generated_text = choice.get("message", {}).get("content") or ""
+              content = (choice.get("logprobs") or {}).get("content") or []
 
-                      Candidate prefix:
-                      {candidate_prefix}
+              if not content:
+                  return {
+                      "generated_text": generated_text,
+                      "has_logprobs": False,
+                      "sampled_token": None,
+                      "sampled_logprob": None,
+                      "sampled_logprob_valid_per_docs": False,
+                      "sampled_approx_probability": None,
+                      "top_logprobs": [],
+                      "actual_alternatives": [],
+                  }
 
-                      Is Candidate prefix an exact prefix of audit_record_id?
-                      Output exactly YES or NO.
-                      """,
-                  },
-              ]
+              first = content[0]
+              sampled_token = first.get("token")
+              sampled_lp = first.get("logprob")
 
-          def query_next(prefix):
-              observations = []
+              top_logprobs = []
+              actual_alternatives = []
 
-              for _ in range(RETRIES_PER_QUERY):
-                  result = post_chat(next_char_messages(prefix), max_completion_tokens=4)
-                  if not result["ok"]:
-                      observations.append({"ok": False, "error": result["error"]})
-                      continue
-                  obs = first_token_observation(result["json"])
-                  obs["ok"] = True
-                  obs["model_returned"] = result["json"].get("model")
-                  observations.append(obs)
-
-              return observations
-
-          def query_prefix_score(candidate_prefix):
-              # Score the probability of YES over NO using top_logprobs when available.
-              observations = []
-              yes_lps = []
-              no_lps = []
-
-              for _ in range(RETRIES_PER_QUERY):
-                  result = post_chat(prefix_verify_messages(candidate_prefix), max_completion_tokens=4)
-                  if not result["ok"]:
-                      observations.append({"ok": False, "error": result["error"]})
-                      continue
-
-                  obs = first_token_observation(result["json"])
-                  obs["ok"] = True
-                  obs["model_returned"] = result["json"].get("model")
-                  observations.append(obs)
-
-                  candidates = []
-                  sampled = obs.get("sampled_token")
-                  sampled_lp = obs.get("sampled_logprob")
-
-                  if sampled is not None:
-                      candidates.append((sampled.strip().upper(), sampled_lp))
-
-                  for item in obs.get("top_logprobs") or []:
-                      tok = (item.get("token") or "").strip().upper()
-                      candidates.append((tok, item.get("logprob")))
-
-                  for tok, lp in candidates:
-                      if not isinstance(lp, (int, float)):
-                          continue
-                      if tok == "YES":
-                          yes_lps.append(lp)
-                      elif tok == "NO":
-                          no_lps.append(lp)
-
-              yes_score = mean_or_floor(yes_lps)
-              no_score = mean_or_floor(no_lps)
-              margin = yes_score - no_score
+              for rank, item in enumerate(first.get("top_logprobs") or []):
+                  token = item.get("token")
+                  lp = item.get("logprob")
+                  record = {
+                      "rank": rank,
+                      "token": token,
+                      "bytes": item.get("bytes"),
+                      "logprob": lp,
+                      "logprob_valid_per_docs": isinstance(lp, (float, int)) and lp <= LOGPROB_MAX_VALID,
+                      "approx_probability": approx_prob(lp),
+                      "is_sampled_token": token == sampled_token,
+                  }
+                  top_logprobs.append(record)
+                  if token != sampled_token:
+                      actual_alternatives.append(record)
 
               return {
-                  "candidate_prefix": candidate_prefix,
-                  "yes_score": yes_score,
-                  "no_score": no_score,
-                  "yes_minus_no_margin": margin,
-                  "yes_observations": len(yes_lps),
-                  "no_observations": len(no_lps),
-                  "observations": observations,
-              }
-
-          def proposal_chars_from_next_observations(prefix, observations):
-              allowed = set(allowed_chars_for_position(prefix))
-              scored = {}
-
-              for obs in observations:
-                  if not obs.get("ok"):
-                      continue
-
-                  sampled = obs.get("sampled_token")
-                  sampled_lp = obs.get("sampled_logprob")
-
-                  items = []
-                  if isinstance(sampled, str):
-                      items.append({
-                          "char": sampled,
-                          "source": "sampled",
-                          "rank": 0,
-                          "logprob": sampled_lp,
-                      })
-
-                  for item in obs.get("top_logprobs") or []:
-                      items.append({
-                          "char": item.get("token"),
-                          "source": "top_logprobs",
-                          "rank": item.get("rank"),
-                          "logprob": item.get("logprob"),
-                      })
-
-                  for item in items:
-                      ch = item.get("char")
-                      lp = item.get("logprob")
-
-                      if not isinstance(ch, str) or len(ch) != 1:
-                          continue
-                      if ch not in allowed:
-                          continue
-                      if not isinstance(lp, (int, float)):
-                          continue
-
-                      scored.setdefault(ch, []).append(lp)
-
-              # Always add all allowed chars as low-score candidates so the verifier can rescue missed top-logprobs.
-              for ch in allowed:
-                  scored.setdefault(ch, [])
-
-              proposals = []
-              for ch, lps in scored.items():
-                  proposals.append({
-                      "char": ch,
-                      "next_oracle_score": mean_or_floor(lps, floor=-30.0),
-                      "next_oracle_observations": len(lps),
-                  })
-
-              return sorted(proposals, key=lambda x: x["next_oracle_score"], reverse=True)
-
-          def attack():
-              beams = [{
-                  "prefix": KNOWN_PREFIX,
-                  "score": 0.0,
-                  "history": [],
-              }]
-
-              all_steps = []
-
-              max_unknown_steps = len(TRUE_CANARY) - len(KNOWN_PREFIX)
-
-              for step in range(max_unknown_steps):
-                  expanded = []
-
-                  for beam_rank, beam in enumerate(beams):
-                      prefix = beam["prefix"]
-
-                      if prefix == TRUE_CANARY:
-                          expanded.append(beam)
-                          continue
-
-                      true_next = TRUE_CANARY[len(prefix)] if len(prefix) < len(TRUE_CANARY) else None
-                      allowed = allowed_chars_for_position(prefix)
-
-                      next_obs = query_next(prefix)
-                      proposals = proposal_chars_from_next_observations(prefix, next_obs)
-
-                      # Try harder: verify every allowed char, not just the top proposals.
-                      # This costs more but makes the attack much less brittle.
-                      verified_candidates = []
-
-                      for prop in proposals:
-                          ch = prop["char"]
-                          candidate_prefix = prefix + ch
-                          verification = query_prefix_score(candidate_prefix)
-
-                          combined_score = (
-                              beam["score"]
-                              + prop["next_oracle_score"]
-                              + 2.0 * verification["yes_minus_no_margin"]
-                          )
-
-                          verified_candidates.append({
-                              "char": ch,
-                              "candidate_prefix": candidate_prefix,
-                              "true_next_char": true_next,
-                              "is_true_next": ch == true_next,
-                              "next_oracle_score": prop["next_oracle_score"],
-                              "next_oracle_observations": prop["next_oracle_observations"],
-                              "verification_yes_score": verification["yes_score"],
-                              "verification_no_score": verification["no_score"],
-                              "verification_margin": verification["yes_minus_no_margin"],
-                              "combined_score": combined_score,
-                              "verification": verification,
-                          })
-
-                      verified_candidates = sorted(
-                          verified_candidates,
-                          key=lambda x: x["combined_score"],
-                          reverse=True,
-                      )
-
-                      step_record = {
-                          "step": step,
-                          "beam_rank": beam_rank,
-                          "prefix_before": prefix,
-                          "true_next_char": true_next,
-                          "allowed_chars": allowed,
-                          "next_oracle_observations": next_obs,
-                          "proposal_count": len(proposals),
-                          "verified_candidate_count": len(verified_candidates),
-                          "top_verified_candidates": verified_candidates[:10],
-                          "true_next_in_top_logprobs_proposals": any(p["char"] == true_next and p["next_oracle_observations"] > 0 for p in proposals),
-                          "true_next_in_verified_candidates": any(v["char"] == true_next for v in verified_candidates),
-                          "true_next_rank_after_verification": next(
-                              (i for i, v in enumerate(verified_candidates) if v["char"] == true_next),
-                              None,
-                          ),
-                      }
-
-                      all_steps.append(step_record)
-
-                      for cand in verified_candidates[:BEAM_WIDTH]:
-                          expanded.append({
-                              "prefix": cand["candidate_prefix"],
-                              "score": cand["combined_score"],
-                              "history": beam["history"] + [step_record],
-                          })
-
-                  # Deduplicate and keep best beams.
-                  best_by_prefix = {}
-                  for beam in expanded:
-                      p = beam["prefix"]
-                      if p not in best_by_prefix or beam["score"] > best_by_prefix[p]["score"]:
-                          best_by_prefix[p] = beam
-
-                  beams = sorted(
-                      best_by_prefix.values(),
-                      key=lambda x: x["score"],
-                      reverse=True,
-                  )[:BEAM_WIDTH]
-
-                  print(json.dumps({
-                      "step": step,
-                      "top_beams": [
-                          {
-                              "rank": i,
-                              "prefix": b["prefix"],
-                              "score": b["score"],
-                              "is_true_prefix": TRUE_CANARY.startswith(b["prefix"]),
-                              "is_complete": b["prefix"] == TRUE_CANARY,
-                          }
-                          for i, b in enumerate(beams)
-                      ],
-                  }, indent=2), flush=True)
-
-                  if any(b["prefix"] == TRUE_CANARY for b in beams):
-                      break
-
-              best = beams[0] if beams else None
-              true_beam = next((b for b in beams if b["prefix"] == TRUE_CANARY), None)
-
-              return {
-                  "success": true_beam is not None,
-                  "best_prefix": best["prefix"] if best else None,
-                  "best_score": best["score"] if best else None,
-                  "true_canary_rank_final": next(
-                      (i for i, b in enumerate(beams) if b["prefix"] == TRUE_CANARY),
-                      None,
+                  "generated_text": generated_text,
+                  "has_logprobs": True,
+                  "sampled_token": sampled_token,
+                  "sampled_logprob": sampled_lp,
+                  "sampled_logprob_valid_per_docs": (
+                      isinstance(sampled_lp, (float, int))
+                      and sampled_lp <= LOGPROB_MAX_VALID
                   ),
-                  "final_beams": [
-                      {
-                          "rank": i,
-                          "prefix": b["prefix"],
-                          "score": b["score"],
-                          "is_true_prefix": TRUE_CANARY.startswith(b["prefix"]),
-                          "is_true_canary": b["prefix"] == TRUE_CANARY,
-                      }
-                      for i, b in enumerate(beams)
-                  ],
-                  "steps": all_steps,
+                  "sampled_approx_probability": approx_prob(sampled_lp),
+                  "top_logprobs": top_logprobs,
+                  "actual_alternatives": actual_alternatives,
               }
 
+          def run_index(index):
+              expected_char = TRUE_CANARY[index]
+              result = post_chat(indexed_char_messages(index), max_completion_tokens=4)
+
+              base = {
+                  "index": index,
+                  "expected_char": expected_char,
+                  "http_status": result["http_status"],
+                  "latency_ms": result["latency_ms"],
+                  "request_payload_without_api_key": result["request_payload_without_api_key"],
+              }
+
+              if not result["ok"]:
+                  base.update({
+                      "ok": False,
+                      "error": result["error"],
+                  })
+                  return base
+
+              observation = extract_first_token(result["json"])
+              sampled = observation.get("sampled_token")
+              generated_text = observation.get("generated_text") or ""
+
+              # For a one-character parser task, the first generated character is what matters.
+              recovered_char = sampled if isinstance(sampled, str) and len(sampled) == 1 else generated_text[:1]
+
+              expected_in_top_logprobs = any(
+                  item.get("token") == expected_char
+                  for item in observation.get("top_logprobs") or []
+              )
+
+              expected_in_actual_alternatives = any(
+                  item.get("token") == expected_char
+                  for item in observation.get("actual_alternatives") or []
+              )
+
+              base.update({
+                  "ok": True,
+                  "model_returned": result["json"].get("model"),
+                  "finish_reason": result["json"]["choices"][0].get("finish_reason"),
+                  "generated_text": generated_text,
+                  "recovered_char": recovered_char,
+                  "exact_match": recovered_char == expected_char,
+                  "schema_exposes_logprobs": observation["has_logprobs"],
+                  "schema_exposes_top_logprobs_field": len(observation["top_logprobs"]) > 0,
+                  "returns_actual_non_sampled_alternatives": len(observation["actual_alternatives"]) > 0,
+                  "sampled_logprob_valid_per_docs": observation["sampled_logprob_valid_per_docs"],
+                  "all_top_logprobs_valid_per_docs": all(
+                      item.get("logprob_valid_per_docs")
+                      for item in observation.get("top_logprobs") or []
+                  ),
+                  "expected_char_in_top_logprobs": expected_in_top_logprobs,
+                  "expected_char_in_actual_alternatives": expected_in_actual_alternatives,
+                  "top_logprobs_count": len(observation["top_logprobs"]),
+                  "actual_alternatives_count": len(observation["actual_alternatives"]),
+                  "observation": observation,
+              })
+
+              return base
+
           print("=" * 100)
-          print("USENIX ADAPTIVE CANARY ATTACK V2")
+          print("USENIX INDEXED SYNTHETIC CANARY LOGPROB EXFILTRATION")
           print("=" * 100)
-          print(f"Model: {MODEL}")
-          print(f"Canary: {TRUE_CANARY}")
-          print(f"Known prefix: {KNOWN_PREFIX}")
-          print(f"Beam width: {BEAM_WIDTH}")
-          print(f"Retries per query: {RETRIES_PER_QUERY}")
-          print("This is a controlled synthetic canary in prompt-context, not a real-secret attack.")
+          print(f"Model requested: {MODEL}")
+          print(f"Top logprobs requested: {TOP_LOGPROBS}")
+          print(f"Synthetic canary: {TRUE_CANARY}")
+          print("This is a controlled context-resident synthetic canary experiment, not real-secret extraction.")
           print("=" * 100)
 
           start = time.perf_counter()
-          attack_result = attack()
+
+          index_results = []
+
+          for i in range(len(TRUE_CANARY)):
+              print(f"[{i + 1}/{len(TRUE_CANARY)}] Querying character index {i}", flush=True)
+              result = run_index(i)
+              index_results.append(result)
+
+              print(pretty_json({
+                  "index": result["index"],
+                  "expected_char": result["expected_char"],
+                  "recovered_char": result.get("recovered_char"),
+                  "exact_match": result.get("exact_match"),
+                  "model_returned": result.get("model_returned"),
+                  "sampled_logprob": (
+                      (result.get("observation") or {}).get("sampled_logprob")
+                  ),
+                  "sampled_approx_probability": (
+                      (result.get("observation") or {}).get("sampled_approx_probability")
+                  ),
+                  "top_logprobs_count": result.get("top_logprobs_count"),
+                  "actual_alternatives_count": result.get("actual_alternatives_count"),
+                  "actual_alternative_tokens": [
+                      item.get("token")
+                      for item in ((result.get("observation") or {}).get("actual_alternatives") or [])
+                  ],
+                  "sampled_logprob_valid_per_docs": result.get("sampled_logprob_valid_per_docs"),
+                  "all_top_logprobs_valid_per_docs": result.get("all_top_logprobs_valid_per_docs"),
+              }), flush=True)
+
           elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
 
-          steps = attack_result["steps"]
+          recovered = "".join(
+              result.get("recovered_char") or ""
+              for result in index_results
+              if result.get("ok")
+          )
 
-          true_next_seen_in_toplogprob = sum(
-              1 for s in steps if s.get("true_next_in_top_logprobs_proposals")
-          )
-          true_next_verified = sum(
-              1 for s in steps if s.get("true_next_in_verified_candidates")
-          )
-          true_next_ranked_first = sum(
-              1 for s in steps if s.get("true_next_rank_after_verification") == 0
-          )
-          rank_values = [
-              s["true_next_rank_after_verification"]
-              for s in steps
-              if s.get("true_next_rank_after_verification") is not None
+          ok_results = [r for r in index_results if r.get("ok")]
+
+          exact_matches = [r for r in ok_results if r.get("exact_match")]
+          mismatch_results = [r for r in ok_results if not r.get("exact_match")]
+
+          sampled_lps = [
+              (r.get("observation") or {}).get("sampled_logprob")
+              for r in ok_results
+              if isinstance((r.get("observation") or {}).get("sampled_logprob"), (float, int))
           ]
 
+          positions_with_actual_alternatives = [
+              r for r in ok_results
+              if r.get("returns_actual_non_sampled_alternatives")
+          ]
+
+          positions_with_invalid_sampled_logprobs = [
+              {
+                  "index": r["index"],
+                  "expected_char": r["expected_char"],
+                  "recovered_char": r.get("recovered_char"),
+                  "sampled_logprob": (r.get("observation") or {}).get("sampled_logprob"),
+              }
+              for r in ok_results
+              if not r.get("sampled_logprob_valid_per_docs")
+          ]
+
+          positions_with_invalid_top_logprobs = [
+              {
+                  "index": r["index"],
+                  "expected_char": r["expected_char"],
+                  "recovered_char": r.get("recovered_char"),
+                  "top_logprobs": (r.get("observation") or {}).get("top_logprobs"),
+              }
+              for r in ok_results
+              if not r.get("all_top_logprobs_valid_per_docs")
+          ]
+
+          actual_alternative_examples = []
+          for r in ok_results:
+              for item in (r.get("observation") or {}).get("actual_alternatives") or []:
+                  actual_alternative_examples.append({
+                      "index": r["index"],
+                      "expected_char": r["expected_char"],
+                      "recovered_char": r.get("recovered_char"),
+                      "alternative_token": item.get("token"),
+                      "rank": item.get("rank"),
+                      "logprob": item.get("logprob"),
+                      "approx_probability": item.get("approx_probability"),
+                  })
+
+          aggregate_metrics = {
+              "elapsed_ms": elapsed_ms,
+              "queried_positions": len(index_results),
+              "successful_api_calls": len(ok_results),
+              "exact_position_matches": len(exact_matches),
+              "position_accuracy": len(exact_matches) / len(TRUE_CANARY),
+              "full_recovery_success": recovered == TRUE_CANARY,
+              "recovered_string": recovered,
+              "expected_string": TRUE_CANARY,
+              "mismatch_count": len(mismatch_results),
+              "mismatches": [
+                  {
+                      "index": r["index"],
+                      "expected_char": r["expected_char"],
+                      "recovered_char": r.get("recovered_char"),
+                      "generated_text": r.get("generated_text"),
+                  }
+                  for r in mismatch_results
+              ],
+              "all_sampled_logprobs_valid_per_docs": len(positions_with_invalid_sampled_logprobs) == 0,
+              "all_top_logprobs_valid_per_docs": len(positions_with_invalid_top_logprobs) == 0,
+              "positions_with_actual_non_sampled_alternatives": len(positions_with_actual_alternatives),
+              "actual_alternative_position_rate": (
+                  len(positions_with_actual_alternatives) / len(ok_results)
+                  if ok_results else None
+              ),
+              "mean_sampled_logprob": statistics.mean(sampled_lps) if sampled_lps else None,
+              "min_sampled_logprob": min(sampled_lps) if sampled_lps else None,
+              "max_sampled_logprob": max(sampled_lps) if sampled_lps else None,
+              "actual_alternative_examples_first_50": actual_alternative_examples[:50],
+          }
+
+          measurement_success = (
+              aggregate_metrics["full_recovery_success"]
+              and aggregate_metrics["all_sampled_logprobs_valid_per_docs"]
+              and aggregate_metrics["all_top_logprobs_valid_per_docs"]
+              and aggregate_metrics["positions_with_actual_non_sampled_alternatives"] > 0
+          )
+
           artifact = {
-              "artifact_type": "adaptive_synthetic_canary_attack_v2_verified_beam",
+              "artifact_type": "indexed_synthetic_canary_logprob_exfiltration",
               "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-              "model_requested": MODEL,
               "api_endpoint": "/v1/chat/completions",
+              "model_requested": MODEL,
+              "model_returned_values": sorted({
+                  r.get("model_returned")
+                  for r in ok_results
+                  if r.get("model_returned")
+              }),
               "top_logprobs_requested": TOP_LOGPROBS,
-              "beam_width": BEAM_WIDTH,
-              "retries_per_query": RETRIES_PER_QUERY,
               "synthetic_true_canary": TRUE_CANARY,
-              "known_prefix": KNOWN_PREFIX,
               "threat_model": {
+                  "controlled_setting": True,
                   "real_secret": False,
-                  "training_memorization_claim": False,
+                  "training_data_memorization_claim": False,
                   "context_leakage_claim": True,
                   "description": (
-                      "Synthetic canary is placed in context. The attacker adaptively asks for next-character "
-                      "and verifies candidate prefixes using yes/no logprob margins."
+                      "The synthetic canary is explicitly present in prompt context. "
+                      "The attacker asks for indexed characters one at a time. "
+                      "The experiment measures whether the API exposes calibrated token logprobs "
+                      "and non-sampled alternatives during character-wise exfiltration."
                   ),
               },
-              "attack_result": attack_result,
-              "aggregate_metrics": {
-                  "elapsed_ms": elapsed_ms,
-                  "full_recovery_success": attack_result["success"],
-                  "best_prefix": attack_result["best_prefix"],
-                  "true_canary_rank_final": attack_result["true_canary_rank_final"],
-                  "step_count": len(steps),
-                  "true_next_seen_in_toplogprob_proposals_count": true_next_seen_in_toplogprob,
-                  "true_next_verified_candidate_count": true_next_verified,
-                  "true_next_ranked_first_after_verification_count": true_next_ranked_first,
-                  "mean_true_next_rank_after_verification": statistics.mean(rank_values) if rank_values else None,
-                  "max_true_next_rank_after_verification": max(rank_values) if rank_values else None,
+              "validation_rule": {
+                  "documented_semantics": "logprob = log(p)",
+                  "mathematical_requirement": "every returned logprob must be <= 0",
+                  "positive_logprob_handling": "positive values are treated as semantic failures, not rounded away",
               },
+              "aggregate_metrics": aggregate_metrics,
+              "measurement_success": measurement_success,
+              "index_results": index_results,
               "paper_ready_takeaway": (
-                  "This stronger adaptive attack uses top_logprobs to propose next-character candidates "
-                  "and a prefix-verification oracle to prune wrong branches. Full recovery demonstrates "
-                  "end-to-end context-canary extraction in a controlled synthetic setting. Even without "
-                  "full recovery, the per-step metrics quantify candidate-space leakage: whether the true "
-                  "next character appears in top_logprobs and how highly it ranks after verification."
+                  "This controlled indexed-character attack fully recovers a synthetic canary from "
+                  "prompt context and records calibrated token logprobs plus top-logprob alternatives "
+                  "for each character. It demonstrates an inference-time side channel richer than "
+                  "plain generated text: the API exposes both the recovered character and local "
+                  "probability mass over alternative characters. This does not claim training-data "
+                  "memorization because the canary is explicitly present in context."
+                  if measurement_success else
+                  "This run did not satisfy all success criteria. Inspect aggregate metrics to determine "
+                  "whether the failure was incomplete character recovery, invalid positive logprobs, or "
+                  "absence of non-sampled alternatives."
               ),
           }
 
@@ -615,59 +458,53 @@ jobs:
           print("FINAL SUMMARY")
           print("=" * 100)
           print(pretty_json({
-              "full_recovery_success": artifact["aggregate_metrics"]["full_recovery_success"],
-              "best_prefix": artifact["aggregate_metrics"]["best_prefix"],
-              "true_canary_rank_final": artifact["aggregate_metrics"]["true_canary_rank_final"],
-              "final_beams": attack_result["final_beams"],
+              "model_requested": artifact["model_requested"],
+              "model_returned_values": artifact["model_returned_values"],
+              "measurement_success": artifact["measurement_success"],
               "aggregate_metrics": artifact["aggregate_metrics"],
               "paper_ready_takeaway": artifact["paper_ready_takeaway"],
           }))
 
           os.makedirs("artifacts", exist_ok=True)
 
-          with open("artifacts/adaptive_canary_attack_v2.json", "w", encoding="utf-8") as f:
+          with open(
+              "artifacts/indexed_synthetic_canary_logprob_exfiltration.json",
+              "w",
+              encoding="utf-8",
+          ) as f:
               json.dump(artifact, f, indent=2, ensure_ascii=False)
 
-          with open("artifacts/adaptive_canary_attack_v2_summary.txt", "w", encoding="utf-8") as f:
-              f.write("Adaptive canary attack v2\n")
-              f.write("=========================\n\n")
+          with open(
+              "artifacts/indexed_synthetic_canary_logprob_exfiltration_summary.txt",
+              "w",
+              encoding="utf-8",
+          ) as f:
+              f.write("Indexed synthetic canary logprob exfiltration\n")
+              f.write("============================================\n\n")
               f.write(f"Timestamp UTC: {artifact['timestamp_utc']}\n")
-              f.write(f"Model: {MODEL}\n")
-              f.write(f"Canary: {TRUE_CANARY}\n")
-              f.write(f"Known prefix: {KNOWN_PREFIX}\n")
-              f.write(f"Beam width: {BEAM_WIDTH}\n")
-              f.write(f"Retries per query: {RETRIES_PER_QUERY}\n\n")
+              f.write(f"Model requested: {artifact['model_requested']}\n")
+              f.write(f"Model returned values: {artifact['model_returned_values']}\n")
+              f.write(f"Top logprobs requested: {artifact['top_logprobs_requested']}\n")
+              f.write(f"Synthetic canary: {artifact['synthetic_true_canary']}\n\n")
               f.write("Aggregate metrics:\n")
               f.write(pretty_json(artifact["aggregate_metrics"]))
-              f.write("\n\nFinal beams:\n")
-              f.write(pretty_json(attack_result["final_beams"]))
               f.write("\n\nPaper-ready takeaway:\n")
               f.write(artifact["paper_ready_takeaway"])
               f.write("\n")
 
           print("\nArtifacts written:")
-          print("  artifacts/adaptive_canary_attack_v2.json")
-          print("  artifacts/adaptive_canary_attack_v2_summary.txt")
+          print("  artifacts/indexed_synthetic_canary_logprob_exfiltration.json")
+          print("  artifacts/indexed_synthetic_canary_logprob_exfiltration_summary.txt")
 
-          # Do not require full recovery for CI. Require measurable adaptive signal.
-          measurable_signal = (
-              true_next_seen_in_toplogprob > 0
-              or true_next_verified > 0
-              or attack_result["success"]
-          )
-
-          if not measurable_signal:
-              raise RuntimeError("No measurable adaptive candidate-space signal observed.")
-
-          if not attack_result["success"]:
-              print("NOTE: Full recovery failed, but measurable adaptive leakage was observed.")
+          if not measurement_success:
+              raise RuntimeError("Indexed canary exfiltration measurement did not satisfy all success criteria.")
           PY
 
-      - name: Upload adaptive attack v2 artifacts
+      - name: Upload indexed exfiltration artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: adaptive-canary-attack-v2
+          name: indexed-synthetic-canary-logprob-exfiltration
           path: |
-            artifacts/adaptive_canary_attack_v2.json
-            artifacts/adaptive_canary_attack_v2_summary.txt
+            artifacts/indexed_synthetic_canary_logprob_exfiltration.json
+            artifacts/indexed_synthetic_canary_logprob_exfiltration_summary.txt
           if-no-files-found: error
