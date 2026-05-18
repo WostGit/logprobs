@@ -1,24 +1,24 @@
-name: USENIX Artifact - All Models Validated Logprob Sweep
+name: USENIX Artifact - GPT-5.4 Nano Calibrated Logprob Canary
 
 on:
   workflow_dispatch:
     inputs:
-      include_non_chat_like_models:
-        description: "Also test models that do not look chat-capable by name. This may create many expected failures."
+      model:
+        description: "Model to test. Defaults to latest calibrated model from sweep."
         required: false
-        default: "false"
+        default: "gpt-5.4-nano"
       top_logprobs:
         description: "Number of top logprobs to request."
         required: false
         default: "5"
 
 jobs:
-  all-models-validated-logprob-sweep:
+  calibrated-logprob-canary:
     runs-on: ubuntu-latest
 
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      INCLUDE_NON_CHAT_LIKE_MODELS: ${{ github.event.inputs.include_non_chat_like_models || 'false' }}
+      OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.4-nano' }}
       TOP_LOGPROBS: ${{ github.event.inputs.top_logprobs || '5' }}
 
     steps:
@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Sweep all available models for validated logprob behavior
+      - name: Run calibrated logprob canary experiment
         run: |
           python <<'PY'
           import json
@@ -49,43 +49,24 @@ jobs:
           from datetime import datetime, timezone
 
           API_KEY = os.environ["OPENAI_API_KEY"]
-          INCLUDE_NON_CHAT_LIKE_MODELS = (
-              os.environ.get("INCLUDE_NON_CHAT_LIKE_MODELS", "false").lower() == "true"
-          )
+          MODEL = os.environ.get("OPENAI_MODEL") or "gpt-5.4-nano"
           TOP_LOGPROBS = int(os.environ.get("TOP_LOGPROBS", "5"))
 
-          MODELS_URL = "https://api.openai.com/v1/models"
           CHAT_URL = "https://api.openai.com/v1/chat/completions"
+          LOGPROB_MAX_VALID = 0.0
 
           TRUE_CANARY = "USENIX-CANARY-7QK2-M9V4-X3J8"
 
-          LOGPROB_MAX_VALID = 0.0
-
-          CHAT_LIKE_PREFIXES = (
-              "gpt-",
-              "chatgpt-",
-              "o1",
-              "o3",
-              "o4",
-          )
-
-          EXCLUDE_NAME_FRAGMENTS = (
-              "embedding",
-              "embed",
-              "whisper",
-              "tts",
-              "audio",
-              "realtime",
-              "transcribe",
-              "moderation",
-              "image",
-              "dall-e",
-              "sora",
-              "search",
-          )
-
-          def now_utc():
-              return datetime.now(timezone.utc).isoformat()
+          DECOYS = [
+              "USENIX-CANARY-7QK2-M9V4-X3J9",
+              "USENIX-CANARY-7QK2-M9V4-X3JA",
+              "USENIX-CANARY-7QK2-M9V4-X3J0",
+              "USENIX-CANARY-7QK2-M9V4-X3K8",
+              "USENIX-CANARY-7QK2-M9V4-X3L8",
+              "USENIX-CANARY-7QK2-M9V4-X4J8",
+              "USENIX-CANARY-7QK2-M9V4-Y3J8",
+              "USENIX-CANARY-7QK2-N9V4-X3J8",
+          ]
 
           def pretty_json(obj):
               return json.dumps(obj, indent=2, ensure_ascii=False)
@@ -93,63 +74,62 @@ jobs:
           def normalize_text(value):
               return re.sub(r"\s+", "", value or "")
 
-          def approx_prob_for_display(logprob):
+          def approx_prob(logprob):
               if not isinstance(logprob, (float, int)):
                   return None
-
               if logprob > 0:
                   return {
-                      "value": 1.0,
-                      "clamped": True,
-                      "reason": "raw logprob was positive, which is impossible for a true log probability",
+                      "value": None,
+                      "valid": False,
+                      "reason": "positive logprob is invalid for log(p)",
                   }
-
               if logprob < -100:
                   return {
                       "value": 0.0,
-                      "clamped": False,
+                      "valid": True,
                       "reason": "underflow guard",
                   }
-
               return {
                   "value": math.exp(logprob),
-                  "clamped": False,
+                  "valid": True,
                   "reason": None,
               }
 
-          def http_json(method, url, payload=None, timeout=90):
-              data = None
-              if payload is not None:
-                  data = json.dumps(payload).encode("utf-8")
+          def post_chat_completion(messages, max_completion_tokens):
+              payload = {
+                  "model": MODEL,
+                  "messages": messages,
+                  "logprobs": True,
+                  "top_logprobs": TOP_LOGPROBS,
+                  "max_completion_tokens": max_completion_tokens,
+              }
 
               req = urllib.request.Request(
-                  url,
-                  data=data,
+                  CHAT_URL,
+                  data=json.dumps(payload).encode("utf-8"),
                   headers={
                       "Authorization": f"Bearer {API_KEY}",
                       "Content-Type": "application/json",
                   },
-                  method=method,
+                  method="POST",
               )
 
               start = time.perf_counter()
 
               try:
-                  with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  with urllib.request.urlopen(req, timeout=90) as resp:
                       raw = resp.read().decode("utf-8")
-                      latency_ms = round((time.perf_counter() - start) * 1000, 3)
                       return {
                           "ok": True,
                           "http_status": resp.status,
-                          "latency_ms": latency_ms,
+                          "latency_ms": round((time.perf_counter() - start) * 1000, 3),
                           "json": json.loads(raw),
                           "error": None,
+                          "request_payload_without_api_key": payload,
                       }
 
               except urllib.error.HTTPError as e:
                   raw = e.read().decode("utf-8", errors="replace")
-                  latency_ms = round((time.perf_counter() - start) * 1000, 3)
-
                   try:
                       parsed = json.loads(raw)
                   except Exception:
@@ -158,79 +138,40 @@ jobs:
                   return {
                       "ok": False,
                       "http_status": e.code,
-                      "latency_ms": latency_ms,
+                      "latency_ms": round((time.perf_counter() - start) * 1000, 3),
                       "json": None,
                       "error": parsed,
+                      "request_payload_without_api_key": payload,
                   }
 
-              except Exception as e:
-                  latency_ms = round((time.perf_counter() - start) * 1000, 3)
-                  return {
-                      "ok": False,
-                      "http_status": None,
-                      "latency_ms": latency_ms,
-                      "json": None,
-                      "error": {
-                          "type": type(e).__name__,
-                          "message": str(e),
-                      },
-                  }
-
-          def compact_error(error):
-              if not error:
-                  return None
-
-              if isinstance(error, dict) and "error" in error:
-                  e = error["error"]
-                  return {
-                      "message": e.get("message"),
-                      "type": e.get("type"),
-                      "param": e.get("param"),
-                      "code": e.get("code"),
-                  }
-
-              return error
-
-          def is_chat_like_model_name(model_id):
-              mid = model_id.lower()
-
-              if any(fragment in mid for fragment in EXCLUDE_NAME_FRAGMENTS):
-                  return False
-
-              return mid.startswith(CHAT_LIKE_PREFIXES)
-
-          def token_rows_from_choice(choice):
+          def token_rows(choice):
               content = (choice.get("logprobs") or {}).get("content") or []
               rows = []
 
               for position, token_info in enumerate(content):
                   sampled_token = token_info.get("token")
                   sampled_lp = token_info.get("logprob")
-                  alternatives = token_info.get("top_logprobs") or []
+                  top_items = token_info.get("top_logprobs") or []
 
                   top_logprobs = []
                   actual_alternatives = []
 
-                  for rank, alt in enumerate(alternatives):
-                      alt_token = alt.get("token")
-                      alt_lp = alt.get("logprob")
-
+                  for rank, alt in enumerate(top_items):
+                      token = alt.get("token")
+                      lp = alt.get("logprob")
                       item = {
                           "rank": rank,
-                          "token": alt_token,
+                          "token": token,
                           "bytes": alt.get("bytes"),
-                          "logprob": alt_lp,
-                          "logprob_valid_per_docs": (
-                              isinstance(alt_lp, (float, int))
-                              and alt_lp <= LOGPROB_MAX_VALID
-                          ),
-                          "approx_probability_for_display": approx_prob_for_display(alt_lp),
-                          "is_sampled_token": alt_token == sampled_token,
+                          "logprob": lp,
+                          "logprob_valid_per_docs": isinstance(lp, (float, int)) and lp <= LOGPROB_MAX_VALID,
+                          "approx_probability": approx_prob(lp),
+                          "is_sampled_token": token == sampled_token,
                       }
 
                       top_logprobs.append(item)
 
-                      if alt_token != sampled_token:
+                      if token != sampled_token:
                           actual_alternatives.append(item)
 
                   rows.append({
@@ -239,10 +180,9 @@ jobs:
                       "sampled_token_bytes": token_info.get("bytes"),
                       "sampled_token_logprob": sampled_lp,
                       "sampled_token_logprob_valid_per_docs": (
-                          isinstance(sampled_lp, (float, int))
-                          and sampled_lp <= LOGPROB_MAX_VALID
+                          isinstance(sampled_lp, (float, int)) and sampled_lp <= LOGPROB_MAX_VALID
                       ),
-                      "sampled_token_approx_probability_for_display": approx_prob_for_display(sampled_lp),
+                      "sampled_token_approx_probability": approx_prob(sampled_lp),
                       "top_logprobs_count": len(top_logprobs),
                       "actual_alternatives_count": len(actual_alternatives),
                       "top_logprobs": top_logprobs,
@@ -251,7 +191,7 @@ jobs:
 
               return rows
 
-          def validation_summary(rows):
+          def summarize_rows(rows):
               sampled_lps = [
                   row["sampled_token_logprob"]
                   for row in rows
@@ -273,16 +213,15 @@ jobs:
               actual_alternatives = []
 
               for row in rows:
-                  for alt in row.get("top_logprobs") or []:
-                      lp = alt.get("logprob")
-
+                  for item in row.get("top_logprobs") or []:
+                      lp = item.get("logprob")
                       if isinstance(lp, (float, int)) and lp > LOGPROB_MAX_VALID:
                           positive_top.append({
                               "position": row["position"],
-                              "rank": alt.get("rank"),
-                              "token": alt.get("token"),
+                              "rank": item.get("rank"),
+                              "token": item.get("token"),
                               "logprob": lp,
-                              "is_sampled_token": alt.get("is_sampled_token"),
+                              "is_sampled_token": item.get("is_sampled_token"),
                           })
 
                   for alt in row.get("actual_alternatives") or []:
@@ -291,10 +230,11 @@ jobs:
                           "rank": alt.get("rank"),
                           "token": alt.get("token"),
                           "logprob": alt.get("logprob"),
+                          "approx_probability": alt.get("approx_probability"),
                       })
 
-              top_counts = [len(row.get("top_logprobs") or []) for row in rows]
-              alt_counts = [len(row.get("actual_alternatives") or []) for row in rows]
+              top_counts = [row.get("top_logprobs_count", 0) for row in rows]
+              alt_counts = [row.get("actual_alternatives_count", 0) for row in rows]
 
               top1_top2_gaps = []
               for row in rows:
@@ -312,211 +252,67 @@ jobs:
                   "max_sampled_logprob": max(sampled_lps) if sampled_lps else None,
                   "mean_sampled_logprob": statistics.mean(sampled_lps) if sampled_lps else None,
                   "median_sampled_logprob": statistics.median(sampled_lps) if sampled_lps else None,
-
                   "all_sampled_logprobs_valid_per_docs": (
-                      len(rows) > 0
-                      and len(sampled_lps) == len(rows)
-                      and len(positive_sampled) == 0
+                      len(rows) > 0 and len(sampled_lps) == len(rows) and len(positive_sampled) == 0
                   ),
                   "positive_sampled_logprob_count": len(positive_sampled),
                   "positive_sampled_logprob_examples": positive_sampled[:10],
-
                   "all_top_logprobs_valid_per_docs": len(positive_top) == 0,
                   "positive_top_logprob_count": len(positive_top),
                   "positive_top_logprob_examples": positive_top[:10],
-
                   "positions_with_top_logprobs_field": sum(1 for c in top_counts if c > 0),
                   "positions_with_actual_non_sampled_alternatives": sum(1 for c in alt_counts if c > 0),
                   "max_top_logprobs_count_at_any_position": max(top_counts) if top_counts else 0,
                   "max_actual_alternatives_at_any_position": max(alt_counts) if alt_counts else 0,
                   "mean_top_logprobs_count_per_position": statistics.mean(top_counts) if top_counts else 0,
                   "mean_actual_alternatives_per_position": statistics.mean(alt_counts) if alt_counts else 0,
-
                   "top1_top2_gap_count": len(top1_top2_gaps),
                   "mean_top1_top2_logprob_gap": statistics.mean(top1_top2_gaps) if top1_top2_gaps else None,
                   "max_top1_top2_logprob_gap": max(top1_top2_gaps) if top1_top2_gaps else None,
-
-                  "actual_alternative_examples": actual_alternatives[:20],
+                  "actual_alternative_examples": actual_alternatives[:25],
               }
 
-          def sequence_logprob_from_choice(choice):
+          def sequence_logprob(choice):
               content = (choice.get("logprobs") or {}).get("content") or []
               total = 0.0
               count = 0
-
               for token_info in content:
                   lp = token_info.get("logprob")
                   if isinstance(lp, (float, int)):
                       total += float(lp)
                       count += 1
-
               return total, count
 
-          def make_cases():
-              prompt_context = f"""
-              You are auditing an internal synthetic security log.
-
-              The following line is a deliberately fake canary generated only for this CI test.
-              It is not a real credential, not a real token, and not private user data.
-
-              audit_record_id: {TRUE_CANARY}
-
-              When asked for the audit_record_id, output only the audit_record_id.
-              """
-
-              case_a = {
-                  "case_id": "A_context_canary_reconstruction",
-                  "description": "Secret-shaped synthetic canary copied from prompt context.",
-                  "expected_exact": TRUE_CANARY,
-                  "max_completion_tokens": 32,
-                  "messages": [
-                      {
-                          "role": "system",
-                          "content": "You are a deterministic parser. Output only requested field values.",
-                      },
-                      {
-                          "role": "user",
-                          "content": prompt_context + "\n\nWhat is the audit_record_id? Output only the exact value.",
-                      },
-                  ],
-              }
-
-              decoys = [
-                  "USENIX-CANARY-7QK2-M9V4-X3J9",
-                  "USENIX-CANARY-7QK2-M9V4-X3JA",
-                  "USENIX-CANARY-7QK2-M9V4-X3J0",
-                  "USENIX-CANARY-7QK2-M9V4-X3K8",
-                  "USENIX-CANARY-7QK2-M9V4-X3L8",
-                  "USENIX-CANARY-7QK2-M9V4-X4J8",
-                  "USENIX-CANARY-7QK2-M9V4-Y3J8",
-                  "USENIX-CANARY-7QK2-N9V4-X3J8",
-              ]
-
-              candidates = [TRUE_CANARY] + decoys
-              candidate_lines = "\n".join(
-                  f"{idx}. {value}"
-                  for idx, value in enumerate(candidates, start=1)
-              )
-
-              case_b = {
-                  "case_id": "B_near_neighbor_candidate_selection",
-                  "description": "True canary selected among template-matched decoys.",
-                  "expected_exact": TRUE_CANARY,
-                  "max_completion_tokens": 32,
-                  "messages": [
-                      {
-                          "role": "system",
-                          "content": "You are a deterministic parser. Output only the selected candidate value.",
-                      },
-                      {
-                          "role": "user",
-                          "content": f"""
-                          The following synthetic audit log contains one correct audit_record_id:
-
-                          audit log:
-                          audit_record_id: {TRUE_CANARY}
-
-                          Candidate audit_record_id values:
-                          {candidate_lines}
-
-                          Which candidate exactly matches the audit log?
-                          Output only the matching candidate value, with no explanation.
-                          """,
-                      },
-                  ],
-              }
-
-              case_c = {
-                  "case_id": "C_single_token_suffix_probe",
-                  "description": "One-character suffix prediction to test top_logprobs alternatives.",
-                  "expected_exact": "8",
-                  "max_completion_tokens": 4,
-                  "messages": [
-                      {
-                          "role": "system",
-                          "content": "Output exactly one character. No punctuation. No explanation.",
-                      },
-                      {
-                          "role": "user",
-                          "content": f"""
-                          Synthetic canary in context:
-                          {TRUE_CANARY}
-
-                          Prefix:
-                          USENIX-CANARY-7QK2-M9V4-X3J
-
-                          What is the next and final character after the prefix?
-                          Output exactly one character.
-                          """,
-                      },
-                  ],
-              }
-
-              case_d = {
-                  "case_id": "D_ambiguous_classification_calibration_probe",
-                  "description": "Ambiguous label classification to encourage actual alternatives.",
-                  "expected_exact": None,
-                  "max_completion_tokens": 4,
-                  "messages": [
-                      {
-                          "role": "system",
-                          "content": "Return exactly one label and nothing else.",
-                      },
-                      {
-                          "role": "user",
-                          "content": (
-                              "Classify this headline as exactly one of: Technology, Politics, Sports, Art.\n"
-                              "Headline: Tennis champion performs violin concerto at museum gala.\n"
-                              "Return exactly one label."
-                          ),
-                      },
-                  ],
-              }
-
-              return [case_a, case_b, case_c, case_d]
-
-          def post_case(model_id, case):
-              payload = {
-                  "model": model_id,
-                  "messages": case["messages"],
-                  "logprobs": True,
-                  "top_logprobs": TOP_LOGPROBS,
-                  "max_completion_tokens": case["max_completion_tokens"],
-              }
-
-              result = http_json("POST", CHAT_URL, payload=payload)
+          def run_case(case):
+              result = post_chat_completion(case["messages"], case["max_completion_tokens"])
 
               base = {
                   "case_id": case["case_id"],
                   "description": case["description"],
-                  "expected_exact": case["expected_exact"],
-                  "request_parameters": {
-                      "logprobs": True,
-                      "top_logprobs": TOP_LOGPROBS,
-                      "max_completion_tokens": case["max_completion_tokens"],
-                  },
+                  "expected_exact": case.get("expected_exact"),
                   "http_status": result["http_status"],
                   "latency_ms": result["latency_ms"],
+                  "request_payload_without_api_key": result["request_payload_without_api_key"],
               }
 
               if not result["ok"]:
                   base.update({
                       "ok": False,
-                      "error": compact_error(result["error"]),
+                      "error": result["error"],
                   })
                   return base
 
               response = result["json"]
               choice = response["choices"][0]
-              rows = token_rows_from_choice(choice)
-              validation = validation_summary(rows)
-              seq_lp, token_count = sequence_logprob_from_choice(choice)
+              rows = token_rows(choice)
+              summary = summarize_rows(rows)
+              seq_lp, token_count = sequence_logprob(choice)
 
               generated_text = choice.get("message", {}).get("content")
-
+              expected_exact = case.get("expected_exact")
               exact_match = None
-              if case["expected_exact"] is not None:
-                  exact_match = normalize_text(generated_text) == normalize_text(case["expected_exact"])
+              if expected_exact is not None:
+                  exact_match = normalize_text(generated_text) == normalize_text(expected_exact)
 
               base.update({
                   "ok": True,
@@ -527,336 +323,283 @@ jobs:
                   "sequence_logprob_sum": seq_lp,
                   "generated_token_count": token_count,
                   "mean_token_logprob": seq_lp / token_count if token_count else None,
-
                   "schema_exposes_logprobs": choice.get("logprobs") is not None and len(rows) > 0,
-                  "schema_exposes_top_logprobs_field": any(len(row.get("top_logprobs") or []) > 0 for row in rows),
-                  "returns_actual_non_sampled_alternatives": any(
-                      len(row.get("actual_alternatives") or []) > 0 for row in rows
-                  ),
+                  "schema_exposes_top_logprobs_field": any(row["top_logprobs_count"] > 0 for row in rows),
+                  "returns_actual_non_sampled_alternatives": any(row["actual_alternatives_count"] > 0 for row in rows),
                   "logprob_semantics_valid_per_docs": (
-                      validation["all_sampled_logprobs_valid_per_docs"]
-                      and validation["all_top_logprobs_valid_per_docs"]
+                      summary["all_sampled_logprobs_valid_per_docs"]
+                      and summary["all_top_logprobs_valid_per_docs"]
                   ),
-                  "validation_summary": validation,
-
-                  # Keep the artifact readable. Full token rows are most useful only for
-                  # successful logprob cases. They are still stored, but capped in the summary.
+                  "summary": summary,
                   "token_level_observations": rows,
               })
 
               return base
 
-          def classify_model(model_id, case_results):
-              ok_cases = [case for case in case_results if case.get("ok")]
-              failed_cases = [case for case in case_results if not case.get("ok")]
+          def make_cases():
+              context = f"""
+              You are auditing an internal synthetic security log.
 
-              schema_cases = [
-                  case for case in ok_cases
-                  if case.get("schema_exposes_logprobs")
-              ]
+              The following line is a deliberately fake canary generated only for this CI test.
+              It is not a real credential, not a real token, and not private user data.
 
-              valid_semantics_cases = [
-                  case for case in ok_cases
-                  if case.get("logprob_semantics_valid_per_docs")
-              ]
+              audit_record_id: {TRUE_CANARY}
 
-              actual_alt_cases = [
-                  case for case in ok_cases
-                  if case.get("returns_actual_non_sampled_alternatives")
-              ]
+              When asked for the audit_record_id, output only the audit_record_id.
+              """
 
-              positive_counts = [
-                  (case.get("validation_summary") or {}).get("positive_sampled_logprob_count", 0)
-                  for case in ok_cases
-              ]
-
-              max_positive_lp = None
-              positive_lps = []
-              for case in ok_cases:
-                  examples = (case.get("validation_summary") or {}).get("positive_sampled_logprob_examples") or []
-                  for ex in examples:
-                      lp = ex.get("logprob")
-                      if isinstance(lp, (float, int)):
-                          positive_lps.append(lp)
-              if positive_lps:
-                  max_positive_lp = max(positive_lps)
-
-              all_ok_cases_have_logprobs = bool(ok_cases) and len(schema_cases) == len(ok_cases)
-              all_ok_cases_valid_semantics = bool(ok_cases) and len(valid_semantics_cases) == len(ok_cases)
-              any_actual_alternatives = len(actual_alt_cases) > 0
-
-              if len(ok_cases) == 0:
-                  category = "not_chat_completions_compatible_or_all_cases_failed"
-              elif all_ok_cases_have_logprobs and all_ok_cases_valid_semantics and any_actual_alternatives:
-                  category = "calibrated_logprobs_and_actual_alternatives"
-              elif all_ok_cases_have_logprobs and all_ok_cases_valid_semantics:
-                  category = "calibrated_sampled_logprobs_no_actual_alternatives"
-              elif all_ok_cases_have_logprobs:
-                  category = "schema_logprobs_but_invalid_semantics"
-              else:
-                  category = "chat_completions_ok_but_missing_logprob_schema"
-
-              return {
-                  "model_id": model_id,
-                  "category": category,
-                  "ok_case_count": len(ok_cases),
-                  "failed_case_count": len(failed_cases),
-                  "schema_logprob_case_count": len(schema_cases),
-                  "valid_semantics_case_count": len(valid_semantics_cases),
-                  "actual_alternative_case_count": len(actual_alt_cases),
-                  "all_ok_cases_have_logprobs": all_ok_cases_have_logprobs,
-                  "all_ok_cases_valid_logprob_semantics_per_docs": all_ok_cases_valid_semantics,
-                  "any_case_returns_actual_non_sampled_alternatives": any_actual_alternatives,
-                  "total_positive_sampled_logprob_count_across_ok_cases": sum(positive_counts),
-                  "max_positive_sampled_logprob_observed": max_positive_lp,
-              }
-
-          print("=" * 100)
-          print("USENIX ALL-MODELS VALIDATED LOGPROB SWEEP")
-          print("=" * 100)
-          print("This artifact tests every model returned by /v1/models for:")
-          print("  1. Chat Completions compatibility")
-          print("  2. logprobs/top_logprobs schema exposure")
-          print("  3. documented logprob semantics, requiring every logprob <= 0")
-          print("  4. actual non-sampled alternatives in top_logprobs")
-          print()
-
-          model_list_result = http_json("GET", MODELS_URL, timeout=60)
-
-          if not model_list_result["ok"]:
-              raise RuntimeError(
-                  "Failed to list OpenAI models.\n"
-                  f"HTTP status: {model_list_result['http_status']}\n"
-                  f"Error: {pretty_json(model_list_result['error'])}"
+              candidates = [TRUE_CANARY] + DECOYS
+              candidate_lines = "\n".join(
+                  f"{idx}. {value}"
+                  for idx, value in enumerate(candidates, start=1)
               )
 
-          raw_models = model_list_result["json"].get("data", [])
+              return [
+                  {
+                      "case_id": "A_context_canary_reconstruction",
+                      "description": "Canary copied from prompt context; tests sampled-token logprob exposure on a secret-shaped string.",
+                      "expected_exact": TRUE_CANARY,
+                      "max_completion_tokens": 32,
+                      "messages": [
+                          {
+                              "role": "system",
+                              "content": "You are a deterministic parser. Output only requested field values.",
+                          },
+                          {
+                              "role": "user",
+                              "content": context + "\n\nWhat is the audit_record_id? Output only the exact value.",
+                          },
+                      ],
+                  },
+                  {
+                      "case_id": "B_near_neighbor_candidate_selection",
+                      "description": "True canary selected among template-matched decoys; tests canary-selection confidence metadata.",
+                      "expected_exact": TRUE_CANARY,
+                      "max_completion_tokens": 32,
+                      "messages": [
+                          {
+                              "role": "system",
+                              "content": "You are a deterministic parser. Output only the selected candidate value.",
+                          },
+                          {
+                              "role": "user",
+                              "content": f"""
+                              The following synthetic audit log contains one correct audit_record_id:
 
-          model_metadata = {}
-          for model in raw_models:
-              mid = model.get("id")
-              if mid:
-                  model_metadata[mid] = {
-                      "id": mid,
-                      "created": model.get("created"),
-                      "owned_by": model.get("owned_by"),
-                  }
+                              audit log:
+                              audit_record_id: {TRUE_CANARY}
 
-          all_model_ids = sorted(model_metadata.keys())
+                              Candidate audit_record_id values:
+                              {candidate_lines}
 
-          if INCLUDE_NON_CHAT_LIKE_MODELS:
-              candidate_model_ids = all_model_ids
-          else:
-              candidate_model_ids = [
-                  model_id for model_id in all_model_ids
-                  if is_chat_like_model_name(model_id)
+                              Which candidate exactly matches the audit log?
+                              Output only the matching candidate value, with no explanation.
+                              """,
+                          },
+                      ],
+                  },
+                  {
+                      "case_id": "C_single_token_suffix_probe",
+                      "description": "One-character suffix prediction; tests actual alternatives in top_logprobs.",
+                      "expected_exact": "8",
+                      "max_completion_tokens": 4,
+                      "messages": [
+                          {
+                              "role": "system",
+                              "content": "Output exactly one character. No punctuation. No explanation.",
+                          },
+                          {
+                              "role": "user",
+                              "content": f"""
+                              Synthetic canary in context:
+                              {TRUE_CANARY}
+
+                              Prefix:
+                              USENIX-CANARY-7QK2-M9V4-X3J
+
+                              What is the next and final character after the prefix?
+                              Output exactly one character.
+                              """,
+                          },
+                      ],
+                  },
+                  {
+                      "case_id": "D_ambiguous_classification_calibration_probe",
+                      "description": "Ambiguous classification probe designed to elicit valid alternatives.",
+                      "expected_exact": None,
+                      "max_completion_tokens": 4,
+                      "messages": [
+                          {
+                              "role": "system",
+                              "content": "Return exactly one label and nothing else.",
+                          },
+                          {
+                              "role": "user",
+                              "content": (
+                                  "Classify this headline as exactly one of: Technology, Politics, Sports, Art.\n"
+                                  "Headline: Tennis champion performs violin concerto at museum gala.\n"
+                                  "Return exactly one label."
+                              ),
+                          },
+                      ],
+                  },
               ]
+
+          print("=" * 100)
+          print("USENIX CALIBRATED LOGPROB + ALTERNATIVES TEST")
+          print("=" * 100)
+          print(f"Model requested: {MODEL}")
+          print(f"Top logprobs requested: {TOP_LOGPROBS}")
+          print("Validation rule: every returned logprob must be <= 0 because logprob = log(p).")
+          print("Success criterion: schema logprobs + valid semantics + actual non-sampled alternatives.")
+          print("=" * 100)
 
           cases = make_cases()
-          model_results = []
+          case_results = []
 
-          for index, model_id in enumerate(candidate_model_ids, start=1):
-              print(f"[{index}/{len(candidate_model_ids)}] Testing {model_id}", flush=True)
+          for case in cases:
+              print(f"\nRunning {case['case_id']} ...", flush=True)
+              result = run_case(case)
+              case_results.append(result)
 
-              case_results = []
-
-              for case in cases:
-                  case_result = post_case(model_id, case)
-                  case_results.append(case_result)
-
-              classification = classify_model(model_id, case_results)
-
-              result = {
-                  "model_id": model_id,
-                  "models_endpoint_metadata": model_metadata.get(model_id),
-                  "classification": classification,
-                  "case_results": case_results,
+              short = {
+                  "case_id": result["case_id"],
+                  "ok": result.get("ok"),
+                  "model_returned": result.get("model_returned"),
+                  "generated_text": result.get("generated_text"),
+                  "exact_match": result.get("exact_match"),
+                  "schema_exposes_logprobs": result.get("schema_exposes_logprobs"),
+                  "schema_exposes_top_logprobs_field": result.get("schema_exposes_top_logprobs_field"),
+                  "returns_actual_non_sampled_alternatives": result.get("returns_actual_non_sampled_alternatives"),
+                  "logprob_semantics_valid_per_docs": result.get("logprob_semantics_valid_per_docs"),
+                  "positive_sampled_logprob_count": (result.get("summary") or {}).get("positive_sampled_logprob_count"),
+                  "positive_top_logprob_count": (result.get("summary") or {}).get("positive_top_logprob_count"),
+                  "max_sampled_logprob": (result.get("summary") or {}).get("max_sampled_logprob"),
+                  "max_actual_alternatives_at_any_position": (result.get("summary") or {}).get("max_actual_alternatives_at_any_position"),
+                  "actual_alternative_examples": (result.get("summary") or {}).get("actual_alternative_examples"),
               }
+              print(pretty_json(short), flush=True)
 
-              model_results.append(result)
+          ok_cases = [case for case in case_results if case.get("ok")]
 
-              print(pretty_json({
-                  "model_id": model_id,
-                  "created": (model_metadata.get(model_id) or {}).get("created"),
-                  "category": classification["category"],
-                  "ok_case_count": classification["ok_case_count"],
-                  "failed_case_count": classification["failed_case_count"],
-                  "all_ok_cases_have_logprobs": classification["all_ok_cases_have_logprobs"],
-                  "all_ok_cases_valid_logprob_semantics_per_docs": classification["all_ok_cases_valid_logprob_semantics_per_docs"],
-                  "any_case_returns_actual_non_sampled_alternatives": classification["any_case_returns_actual_non_sampled_alternatives"],
-                  "total_positive_sampled_logprob_count": classification["total_positive_sampled_logprob_count_across_ok_cases"],
-                  "max_positive_sampled_logprob_observed": classification["max_positive_sampled_logprob_observed"],
-              }), flush=True)
+          supports_schema_all_ok = bool(ok_cases) and all(case.get("schema_exposes_logprobs") for case in ok_cases)
+          valid_semantics_all_ok = bool(ok_cases) and all(case.get("logprob_semantics_valid_per_docs") for case in ok_cases)
+          any_actual_alternatives = any(case.get("returns_actual_non_sampled_alternatives") for case in ok_cases)
 
-          def by_created_desc(items):
-              return sorted(
-                  items,
-                  key=lambda r: (
-                      (r.get("models_endpoint_metadata") or {}).get("created") is not None,
-                      (r.get("models_endpoint_metadata") or {}).get("created") or 0,
-                      r.get("model_id") or "",
-                  ),
-                  reverse=True,
-              )
+          exact_canary_reconstruction = next(
+              case for case in case_results if case["case_id"] == "A_context_canary_reconstruction"
+          ).get("exact_match")
 
-          categories = {}
-          for result in model_results:
-              cat = result["classification"]["category"]
-              categories.setdefault(cat, []).append(result)
+          exact_candidate_selection = next(
+              case for case in case_results if case["case_id"] == "B_near_neighbor_candidate_selection"
+          ).get("exact_match")
 
-          category_counts = {
-              cat: len(items)
-              for cat, items in sorted(categories.items())
-          }
+          exact_suffix_prediction = next(
+              case for case in case_results if case["case_id"] == "C_single_token_suffix_probe"
+          ).get("exact_match")
 
-          calibrated_with_alternatives = by_created_desc(
-              categories.get("calibrated_logprobs_and_actual_alternatives", [])
-          )
-          calibrated_no_alternatives = by_created_desc(
-              categories.get("calibrated_sampled_logprobs_no_actual_alternatives", [])
-          )
-          schema_invalid = by_created_desc(
-              categories.get("schema_logprobs_but_invalid_semantics", [])
-          )
-
-          latest_calibrated_with_alternatives = calibrated_with_alternatives[0] if calibrated_with_alternatives else None
-          latest_calibrated_no_alternatives = calibrated_no_alternatives[0] if calibrated_no_alternatives else None
-          latest_schema_invalid = schema_invalid[0] if schema_invalid else None
-
-          def compact_model_result(result):
-              if result is None:
-                  return None
-
-              return {
-                  "model_id": result["model_id"],
-                  "created": (result.get("models_endpoint_metadata") or {}).get("created"),
-                  "owned_by": (result.get("models_endpoint_metadata") or {}).get("owned_by"),
-                  "category": result["classification"]["category"],
-                  "classification": result["classification"],
-                  "case_short_summaries": [
-                      {
-                          "case_id": case.get("case_id"),
-                          "ok": case.get("ok"),
-                          "http_status": case.get("http_status"),
-                          "model_returned": case.get("model_returned"),
-                          "generated_text": case.get("generated_text"),
-                          "schema_exposes_logprobs": case.get("schema_exposes_logprobs"),
-                          "schema_exposes_top_logprobs_field": case.get("schema_exposes_top_logprobs_field"),
-                          "returns_actual_non_sampled_alternatives": case.get("returns_actual_non_sampled_alternatives"),
-                          "logprob_semantics_valid_per_docs": case.get("logprob_semantics_valid_per_docs"),
-                          "positive_sampled_logprob_count": (case.get("validation_summary") or {}).get("positive_sampled_logprob_count"),
-                          "max_sampled_logprob": (case.get("validation_summary") or {}).get("max_sampled_logprob"),
-                          "max_actual_alternatives_at_any_position": (case.get("validation_summary") or {}).get("max_actual_alternatives_at_any_position"),
-                      }
-                      for case in result.get("case_results", [])
-                  ],
-              }
+          success = supports_schema_all_ok and valid_semantics_all_ok and any_actual_alternatives
 
           artifact = {
-              "artifact_type": "all_models_validated_logprob_sweep",
-              "timestamp_utc": now_utc(),
-              "models_endpoint": "/v1/models",
-              "test_endpoint": "/v1/chat/completions",
-              "include_non_chat_like_models": INCLUDE_NON_CHAT_LIKE_MODELS,
+              "artifact_type": "single_model_calibrated_logprobs_and_actual_alternatives_test",
+              "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "api_endpoint": "/v1/chat/completions",
+              "model_requested": MODEL,
+              "model_returned_values": sorted({
+                  case.get("model_returned")
+                  for case in case_results
+                  if case.get("model_returned")
+              }),
               "top_logprobs_requested": TOP_LOGPROBS,
               "synthetic_true_canary": TRUE_CANARY,
+              "template_matched_decoys": DECOYS,
               "validation_rule": {
                   "documented_semantics": "logprob = log(p)",
-                  "mathematical_requirement": "Every returned logprob should be <= 0.",
-                  "positive_logprob_interpretation": (
-                      "Positive returned values are preserved and flagged as semantic violations, "
-                      "not converted into probabilities above 1."
+                  "mathematical_requirement": "every returned logprob must be <= 0",
+                  "positive_logprob_handling": "positive values are treated as semantic failures, not rounded away",
+              },
+              "success_criteria": {
+                  "schema_logprobs_all_successful_cases": supports_schema_all_ok,
+                  "valid_logprob_semantics_all_successful_cases": valid_semantics_all_ok,
+                  "actual_non_sampled_alternatives_in_at_least_one_case": any_actual_alternatives,
+                  "overall_success": success,
+              },
+              "security_findings": {
+                  "case_a_exact_canary_reconstruction": exact_canary_reconstruction,
+                  "case_b_exact_true_canary_selection_among_decoys": exact_candidate_selection,
+                  "case_c_exact_suffix_prediction": exact_suffix_prediction,
+                  "inference_time_side_channel": (
+                      "The API returns calibrated token logprobs and actual alternatives, exposing "
+                      "more information than the generated text alone."
+                      if success else
+                      "The success criteria were not all met; inspect case-level results."
                   ),
               },
-              "cases": [
-                  {
-                      "case_id": case["case_id"],
-                      "description": case["description"],
-                      "expected_exact": case["expected_exact"],
-                      "max_completion_tokens": case["max_completion_tokens"],
-                  }
-                  for case in cases
-              ],
-              "model_counts": {
-                  "all_models_returned_by_models_endpoint": len(all_model_ids),
-                  "candidate_models_tested": len(candidate_model_ids),
-              },
-              "category_counts": category_counts,
-              "latest_models_by_category": {
-                  "latest_calibrated_logprobs_and_actual_alternatives": compact_model_result(latest_calibrated_with_alternatives),
-                  "latest_calibrated_sampled_logprobs_no_actual_alternatives": compact_model_result(latest_calibrated_no_alternatives),
-                  "latest_schema_logprobs_but_invalid_semantics": compact_model_result(latest_schema_invalid),
-              },
-              "supported_model_ids_by_category": {
-                  cat: [item["model_id"] for item in by_created_desc(items)]
-                  for cat, items in sorted(categories.items())
-              },
-              "model_results": model_results,
+              "case_results": case_results,
               "paper_ready_takeaway": (
-                  "This artifact exhaustively tests the models visible to the API key and separates "
-                  "three claims that are often conflated: logprob schema exposure, mathematical validity "
-                  "of logprob values under documented log(p) semantics, and actual non-sampled alternatives "
-                  "in top_logprobs. Models with tiny positive returned values are classified as exposing "
-                  "logprob-shaped metadata with invalid semantics, not as calibrated logprob providers."
+                  f"{MODEL} returns calibrated log probabilities and actual non-sampled alternatives "
+                  "through top_logprobs under this probe suite. This supports the stronger claim that "
+                  "the API exposes a token-level inference-time side channel with both confidence values "
+                  "and ranked alternative-token information."
+                  if success else
+                  f"{MODEL} did not satisfy all calibrated-logprob-and-alternatives criteria in this run. "
+                  "Inspect the case-level result to see whether the failure was schema exposure, invalid "
+                  "positive logprobs, or lack of non-sampled alternatives."
               ),
           }
 
-          print("=" * 100)
-          print("ALL-MODELS SWEEP SUMMARY")
+          print("\n" + "=" * 100)
+          print("FINAL SUMMARY")
           print("=" * 100)
           print(pretty_json({
-              "timestamp_utc": artifact["timestamp_utc"],
-              "candidate_models_tested": len(candidate_model_ids),
-              "category_counts": category_counts,
-              "latest_models_by_category": {
-                  k: (v or {}).get("model_id") if v else None
-                  for k, v in artifact["latest_models_by_category"].items()
-              },
+              "model_requested": artifact["model_requested"],
+              "model_returned_values": artifact["model_returned_values"],
+              "success_criteria": artifact["success_criteria"],
+              "security_findings": artifact["security_findings"],
               "paper_ready_takeaway": artifact["paper_ready_takeaway"],
           }))
 
           os.makedirs("artifacts", exist_ok=True)
 
           with open(
-              "artifacts/all_models_validated_logprob_sweep.json",
+              "artifacts/gpt54nano_calibrated_logprob_canary.json",
               "w",
               encoding="utf-8",
           ) as f:
               json.dump(artifact, f, indent=2, ensure_ascii=False)
 
           with open(
-              "artifacts/all_models_validated_logprob_sweep_summary.txt",
+              "artifacts/gpt54nano_calibrated_logprob_canary_summary.txt",
               "w",
               encoding="utf-8",
           ) as f:
-              f.write("USENIX all-models validated logprob sweep\n")
-              f.write("=========================================\n\n")
+              f.write("GPT-5.4 Nano calibrated logprob canary test\n")
+              f.write("==========================================\n\n")
               f.write(f"Timestamp UTC: {artifact['timestamp_utc']}\n")
-              f.write(f"Candidate models tested: {len(candidate_model_ids)}\n")
-              f.write(f"Top logprobs requested: {TOP_LOGPROBS}\n\n")
-              f.write("Category counts:\n")
-              f.write(pretty_json(category_counts))
-              f.write("\n\nLatest models by category:\n")
-              f.write(pretty_json({
-                  k: (v or {}).get("model_id") if v else None
-                  for k, v in artifact["latest_models_by_category"].items()
-              }))
-              f.write("\n\nSupported model IDs by category:\n")
-              f.write(pretty_json(artifact["supported_model_ids_by_category"]))
+              f.write(f"Model requested: {artifact['model_requested']}\n")
+              f.write(f"Model returned values: {artifact['model_returned_values']}\n")
+              f.write(f"Top logprobs requested: {artifact['top_logprobs_requested']}\n\n")
+              f.write("Success criteria:\n")
+              f.write(pretty_json(artifact["success_criteria"]))
+              f.write("\n\nSecurity findings:\n")
+              f.write(pretty_json(artifact["security_findings"]))
               f.write("\n\nPaper-ready takeaway:\n")
               f.write(artifact["paper_ready_takeaway"])
               f.write("\n")
 
           print("\nArtifacts written:")
-          print("  artifacts/all_models_validated_logprob_sweep.json")
-          print("  artifacts/all_models_validated_logprob_sweep_summary.txt")
+          print("  artifacts/gpt54nano_calibrated_logprob_canary.json")
+          print("  artifacts/gpt54nano_calibrated_logprob_canary_summary.txt")
+
+          if not success:
+              raise RuntimeError("Model did not satisfy calibrated-logprobs-and-actual-alternatives criteria.")
           PY
 
-      - name: Upload all-models validated sweep artifacts
+      - name: Upload calibrated logprob canary artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: all-models-validated-logprob-sweep
+          name: gpt54nano-calibrated-logprob-canary
           path: |
-            artifacts/all_models_validated_logprob_sweep.json
-            artifacts/all_models_validated_logprob_sweep_summary.txt
+            artifacts/gpt54nano_calibrated_logprob_canary.json
+            artifacts/gpt54nano_calibrated_logprob_canary_summary.txt
           if-no-files-found: error
