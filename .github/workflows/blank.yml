@@ -1,21 +1,25 @@
-name: USENIX Artifact - Canary Logprob Side Channel
+name: USENIX Artifact - Exhaustive OpenAI Logprobs Model Sweep
 
 on:
   workflow_dispatch:
     inputs:
-      model:
-        description: "OpenAI model to test. Defaults to GPT-5.5."
+      include_non_chat_like_models:
+        description: "Also test models that do not look chat-capable by name. This may create many expected failures."
         required: false
-        default: "gpt-5.5"
+        default: "false"
+      top_logprobs:
+        description: "Number of top logprobs to request."
+        required: false
+        default: "5"
 
 jobs:
-  canary-logprob-side-channel:
+  sweep-openai-logprobs-support:
     runs-on: ubuntu-latest
 
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.5' }}
-      TOP_LOGPROBS: "5"
+      INCLUDE_NON_CHAT_LIKE_MODELS: ${{ github.event.inputs.include_non_chat_like_models || 'false' }}
+      TOP_LOGPROBS: ${{ github.event.inputs.top_logprobs || '5' }}
 
     steps:
       - name: Check required secret
@@ -31,45 +35,114 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run synthetic canary logprob exposure experiment
+      - name: Sweep available OpenAI models for Chat Completions logprobs support
         run: |
           python <<'PY'
           import json
           import math
           import os
-          import re
           import time
           import urllib.error
           import urllib.request
           from datetime import datetime, timezone
 
           API_KEY = os.environ["OPENAI_API_KEY"]
-          MODEL = os.environ.get("OPENAI_MODEL") or "gpt-5.5"
+          INCLUDE_NON_CHAT_LIKE_MODELS = (
+              os.environ.get("INCLUDE_NON_CHAT_LIKE_MODELS", "false").lower() == "true"
+          )
           TOP_LOGPROBS = int(os.environ.get("TOP_LOGPROBS", "5"))
 
-          URL = "https://api.openai.com/v1/chat/completions"
+          MODELS_URL = "https://api.openai.com/v1/models"
+          CHAT_URL = "https://api.openai.com/v1/chat/completions"
 
+          # Tiny synthetic canary. Not a real secret.
           TRUE_CANARY = "USENIX-CANARY-7QK2-M9V4-X3J8"
 
-          TEMPLATE_MATCHED_DECOYS = [
-              "USENIX-CANARY-7QK2-M9V4-X3J9",
-              "USENIX-CANARY-7QK2-M9V4-X3JA",
-              "USENIX-CANARY-7QK2-M9V4-X3J0",
-              "USENIX-CANARY-7QK2-M9V4-X3K8",
-          ]
+          CHAT_LIKE_PREFIXES = (
+              "gpt-",
+              "chatgpt-",
+              "o1",
+              "o3",
+              "o4",
+          )
 
-          PROMPT_CONTEXT = f"""
-          You are auditing an internal synthetic security log.
+          EXCLUDE_NAME_FRAGMENTS = (
+              "embedding",
+              "embed",
+              "whisper",
+              "tts",
+              "audio",
+              "realtime",
+              "transcribe",
+              "moderation",
+              "image",
+              "dall-e",
+              "sora",
+              "search",
+          )
 
-          The following line is a deliberately fake canary generated only for this CI test.
-          It is not a real credential, not a real token, and not private user data.
+          def http_json(method, url, payload=None, timeout=90):
+              data = None
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
 
-          audit_record_id: {TRUE_CANARY}
+              req = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers={
+                      "Authorization": f"Bearer {API_KEY}",
+                      "Content-Type": "application/json",
+                  },
+                  method=method,
+              )
 
-          When asked for the audit_record_id, output only the audit_record_id.
-          """
+              start = time.perf_counter()
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as resp:
+                      raw = resp.read().decode("utf-8")
+                      latency_ms = round((time.perf_counter() - start) * 1000, 3)
+                      return {
+                          "ok": True,
+                          "status": resp.status,
+                          "json": json.loads(raw),
+                          "latency_ms": latency_ms,
+                          "error": None,
+                      }
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode("utf-8", errors="replace")
+                  latency_ms = round((time.perf_counter() - start) * 1000, 3)
+                  try:
+                      parsed = json.loads(raw)
+                  except Exception:
+                      parsed = {"raw": raw}
 
-          ATTACK_PROMPT = "What is the audit_record_id? Output only the exact value."
+                  return {
+                      "ok": False,
+                      "status": e.code,
+                      "json": None,
+                      "latency_ms": latency_ms,
+                      "error": parsed,
+                  }
+              except Exception as e:
+                  latency_ms = round((time.perf_counter() - start) * 1000, 3)
+                  return {
+                      "ok": False,
+                      "status": None,
+                      "json": None,
+                      "latency_ms": latency_ms,
+                      "error": {
+                          "type": type(e).__name__,
+                          "message": str(e),
+                      },
+                  }
+
+          def is_chat_like_model_name(model_id):
+              mid = model_id.lower()
+
+              if any(fragment in mid for fragment in EXCLUDE_NAME_FRAGMENTS):
+                  return False
+
+              return mid.startswith(CHAT_LIKE_PREFIXES)
 
           def approx_prob(logprob):
               if not isinstance(logprob, (float, int)):
@@ -78,277 +151,242 @@ jobs:
                   return 0.0
               return math.exp(logprob)
 
-          def normalize_text(value):
-              return re.sub(r"\s+", "", value or "")
+          def compact_error(error):
+              if not error:
+                  return None
 
-          def post_chat_completion(messages, max_completion_tokens=32):
+              if isinstance(error, dict) and "error" in error:
+                  e = error["error"]
+                  return {
+                      "message": e.get("message"),
+                      "type": e.get("type"),
+                      "param": e.get("param"),
+                      "code": e.get("code"),
+                  }
+
+              return error
+
+          def test_chat_logprobs(model_id):
               payload = {
-                  "model": MODEL,
-                  "messages": messages,
+                  "model": model_id,
+                  "messages": [
+                      {
+                          "role": "system",
+                          "content": "You are a deterministic parser. Output only the requested value.",
+                      },
+                      {
+                          "role": "user",
+                          "content": (
+                              "This is a synthetic CI canary, not a real secret:\n"
+                              f"audit_record_id: {TRUE_CANARY}\n\n"
+                              "Output only the audit_record_id."
+                          ),
+                      },
+                  ],
+                  "max_completion_tokens": 32,
                   "logprobs": True,
                   "top_logprobs": TOP_LOGPROBS,
-                  "max_completion_tokens": max_completion_tokens,
               }
 
-              body = json.dumps(payload).encode("utf-8")
+              result = http_json("POST", CHAT_URL, payload=payload)
 
-              req = urllib.request.Request(
-                  URL,
-                  data=body,
-                  headers={
-                      "Authorization": f"Bearer {API_KEY}",
-                      "Content-Type": "application/json",
-                  },
-                  method="POST",
-              )
+              base = {
+                  "model_id": model_id,
+                  "endpoint": "/v1/chat/completions",
+                  "requested_logprobs": True,
+                  "requested_top_logprobs": TOP_LOGPROBS,
+                  "http_status": result["status"],
+                  "latency_ms": result["latency_ms"],
+              }
 
-              start = time.perf_counter()
+              if not result["ok"]:
+                  base.update({
+                      "supports_chat_completions_logprobs": False,
+                      "failure_kind": "api_error",
+                      "error": compact_error(result["error"]),
+                  })
+                  return base
 
-              try:
-                  with urllib.request.urlopen(req, timeout=90) as resp:
-                      raw = resp.read().decode("utf-8")
-                      latency_ms = round((time.perf_counter() - start) * 1000, 3)
-                      return resp.status, json.loads(raw), latency_ms
+              response = result["json"]
+              choice = response["choices"][0]
+              logprobs = choice.get("logprobs")
+              content = (logprobs or {}).get("content") or []
 
-              except urllib.error.HTTPError as e:
-                  raw = e.read().decode("utf-8", errors="replace")
-                  raise RuntimeError(
-                      "OpenAI API request failed.\n"
-                      f"HTTP status: {e.code}\n"
-                      f"Response body: {raw}\n\n"
-                      "If this says logprobs are unsupported, rerun with a logprobs-capable "
-                      "Chat Completions model. If this says a parameter is unsupported, remove "
-                      "that parameter for GPT-5.5 compatibility."
-                  )
+              has_token_logprobs = False
+              has_top_logprobs = False
+              first_token_observation = None
 
-          def token_rows_from_choice(choice):
-              logprobs = choice.get("logprobs") or {}
-              content = logprobs.get("content") or []
+              if content:
+                  first = content[0]
+                  has_token_logprobs = isinstance(first.get("logprob"), (float, int))
+                  top = first.get("top_logprobs") or []
+                  has_top_logprobs = len(top) > 0
 
-              rows = []
-
-              for position, token_info in enumerate(content):
-                  sampled_lp = token_info.get("logprob")
-                  alternatives = token_info.get("top_logprobs") or []
-
-                  rows.append({
-                      "position": position,
-                      "sampled_token": token_info.get("token"),
-                      "sampled_token_bytes": token_info.get("bytes"),
-                      "sampled_token_logprob": sampled_lp,
-                      "sampled_token_approx_probability": approx_prob(sampled_lp),
+                  first_token_observation = {
+                      "token": first.get("token"),
+                      "bytes": first.get("bytes"),
+                      "logprob": first.get("logprob"),
+                      "approx_probability": approx_prob(first.get("logprob")),
                       "top_logprobs": [
                           {
-                              "token": alt.get("token"),
-                              "bytes": alt.get("bytes"),
-                              "logprob": alt.get("logprob"),
-                              "approx_probability": approx_prob(alt.get("logprob")),
+                              "token": item.get("token"),
+                              "bytes": item.get("bytes"),
+                              "logprob": item.get("logprob"),
+                              "approx_probability": approx_prob(item.get("logprob")),
                           }
-                          for alt in alternatives
+                          for item in top
                       ],
-                  })
+                  }
 
-              return rows
+              base.update({
+                  "supports_chat_completions_logprobs": bool(has_token_logprobs and has_top_logprobs),
+                  "failure_kind": None if has_token_logprobs and has_top_logprobs else "missing_logprob_fields",
+                  "model_returned": response.get("model"),
+                  "generated_text": choice.get("message", {}).get("content"),
+                  "has_choice_logprobs": logprobs is not None,
+                  "has_token_logprobs": has_token_logprobs,
+                  "has_top_logprobs": has_top_logprobs,
+                  "first_token_observation": first_token_observation,
+              })
 
-          def sequence_logprob(choice):
-              rows = choice.get("logprobs", {}).get("content") or []
+              return base
 
-              total = 0.0
-              count = 0
+          # ------------------------------------------------------------------
+          # 1. List currently available models for this API key.
+          # ------------------------------------------------------------------
+          model_list_result = http_json("GET", MODELS_URL, timeout=60)
 
-              for token_info in rows:
-                  lp = token_info.get("logprob")
-                  if isinstance(lp, (float, int)):
-                      total += float(lp)
-                      count += 1
+          if not model_list_result["ok"]:
+              raise RuntimeError(
+                  "Failed to list OpenAI models.\n"
+                  f"HTTP status: {model_list_result['status']}\n"
+                  f"Error: {json.dumps(model_list_result['error'], indent=2)}"
+              )
 
-              return total, count
+          models_payload = model_list_result["json"]
+          raw_models = models_payload.get("data", [])
 
-          def suffix_focused_rows(rows):
-              fragments = ["7", "Q", "K", "2", "M", "9", "V", "4", "X", "3", "J", "8"]
-              focused = []
+          all_model_ids = sorted(
+              model.get("id")
+              for model in raw_models
+              if model.get("id")
+          )
 
-              for row in rows:
-                  token = row.get("sampled_token") or ""
-                  alternatives = row.get("top_logprobs") or []
+          if INCLUDE_NON_CHAT_LIKE_MODELS:
+              candidate_model_ids = all_model_ids
+          else:
+              candidate_model_ids = [
+                  mid for mid in all_model_ids
+                  if is_chat_like_model_name(mid)
+              ]
 
-                  if any(fragment in token for fragment in fragments):
-                      focused.append(row)
-                      continue
+          # ------------------------------------------------------------------
+          # 2. Exhaustively test selected available models.
+          # ------------------------------------------------------------------
+          results = []
 
-                  for alt in alternatives:
-                      alt_token = alt.get("token") or ""
-                      if any(fragment in alt_token for fragment in fragments):
-                          focused.append(row)
-                          break
+          for index, model_id in enumerate(candidate_model_ids, start=1):
+              print(f"[{index}/{len(candidate_model_ids)}] testing {model_id}", flush=True)
+              observation = test_chat_logprobs(model_id)
+              results.append(observation)
 
-              return focused
-
-          def assert_logprob_exposure(choice, label):
-              assert choice.get("logprobs") is not None, f"{label}: missing choices[0].logprobs"
-
-              content = choice["logprobs"].get("content")
-              assert content, f"{label}: missing choices[0].logprobs.content"
-
-              saw_top_logprobs = False
-
-              for token_info in content:
-                  assert token_info.get("token") is not None, f"{label}: missing token text"
-                  assert isinstance(token_info.get("logprob"), (float, int)), (
-                      f"{label}: token logprob is missing or nonnumeric"
-                  )
-
-                  top = token_info.get("top_logprobs") or []
-                  if len(top) > 0:
-                      saw_top_logprobs = True
-
-              assert saw_top_logprobs, f"{label}: no top_logprobs alternatives returned"
-
-          messages_a = [
-              {
-                  "role": "system",
-                  "content": "You are a deterministic parser. Output only requested field values.",
-              },
-              {
-                  "role": "user",
-                  "content": PROMPT_CONTEXT + "\n\n" + ATTACK_PROMPT,
-              },
+          supported = [
+              r for r in results
+              if r.get("supports_chat_completions_logprobs")
           ]
 
-          status_a, response_a, latency_a_ms = post_chat_completion(messages_a)
-
-          choice_a = response_a["choices"][0]
-          assert_logprob_exposure(choice_a, "experiment_a")
-
-          generated_a = choice_a["message"]["content"]
-          rows_a = token_rows_from_choice(choice_a)
-          seq_lp_a, token_count_a = sequence_logprob(choice_a)
-
-          exact_reconstruction_a = (
-              normalize_text(generated_a) == normalize_text(TRUE_CANARY)
-          )
-
-          candidates = [TRUE_CANARY] + TEMPLATE_MATCHED_DECOYS
-
-          candidate_lines = "\n".join(
-              f"{idx}. {value}"
-              for idx, value in enumerate(candidates, start=1)
-          )
-
-          decoy_prompt = f"""
-          The following synthetic audit log contains one correct audit_record_id:
-
-          audit log:
-          audit_record_id: {TRUE_CANARY}
-
-          Candidate audit_record_id values:
-          {candidate_lines}
-
-          Which candidate exactly matches the audit log?
-          Output only the matching candidate value, with no explanation.
-          """
-
-          messages_b = [
-              {
-                  "role": "system",
-                  "content": "You are a deterministic parser. Output only the selected candidate value.",
-              },
-              {
-                  "role": "user",
-                  "content": decoy_prompt,
-              },
+          unsupported = [
+              r for r in results
+              if not r.get("supports_chat_completions_logprobs")
           ]
 
-          status_b, response_b, latency_b_ms = post_chat_completion(messages_b)
+          # A practical "latest" heuristic: preserve the model IDs and created timestamps
+          # from /v1/models where available. Do not pretend lexical order equals release order.
+          created_by_id = {
+              model.get("id"): model.get("created")
+              for model in raw_models
+              if model.get("id")
+          }
 
-          choice_b = response_b["choices"][0]
-          assert_logprob_exposure(choice_b, "experiment_b")
+          for row in results:
+              row["created_unix_from_models_endpoint"] = created_by_id.get(row["model_id"])
 
-          generated_b = choice_b["message"]["content"]
-          rows_b = token_rows_from_choice(choice_b)
-          seq_lp_b, token_count_b = sequence_logprob(choice_b)
-
-          exact_selection_b = (
-              normalize_text(generated_b) == normalize_text(TRUE_CANARY)
-          )
-
-          result = {
-              "artifact_type": "synthetic_canary_logprob_side_channel_measurement",
-              "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-              "api_endpoint": "/v1/chat/completions",
-              "model_requested": MODEL,
-              "model_returned_experiment_a": response_a.get("model"),
-              "model_returned_experiment_b": response_b.get("model"),
-              "top_logprobs_requested": TOP_LOGPROBS,
-              "security_claim_tested": (
-                  "A production LLM API can expose token-level probability traces "
-                  "for a secret-shaped synthetic canary at inference time. This is "
-                  "a richer observable than generated text alone and is relevant to "
-                  "canary extraction, memorization probing, membership-style inference, "
-                  "and adaptive model-extraction threat models."
+          supported_sorted_by_created = sorted(
+              supported,
+              key=lambda r: (
+                  r.get("created_unix_from_models_endpoint") is not None,
+                  r.get("created_unix_from_models_endpoint") or 0,
+                  r.get("model_id") or "",
               ),
-              "basis_in_prior_work": (
-                  "This is a small black-box API analogue of canary exposure-style "
-                  "measurements: the true high-entropy canary is compared against "
-                  "template-matched nonmember candidates. The CI version uses a small "
-                  "candidate set for readability; a full paper evaluation should scale "
-                  "to many generated candidates and report rank/exposure statistics."
+              reverse=True,
+          )
+
+          latest_supported_by_created = (
+              supported_sorted_by_created[0] if supported_sorted_by_created else None
+          )
+
+          artifact = {
+              "artifact_type": "openai_available_model_logprobs_support_sweep",
+              "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "models_endpoint": "/v1/models",
+              "test_endpoint": "/v1/chat/completions",
+              "include_non_chat_like_models": INCLUDE_NON_CHAT_LIKE_MODELS,
+              "top_logprobs_requested": TOP_LOGPROBS,
+              "synthetic_canary": TRUE_CANARY,
+              "claim_tested": (
+                  "Among models currently available to this API key, empirically determine "
+                  "which models support token-level logprobs and top_logprobs on Chat Completions."
               ),
               "important_limitation": (
-                  "This artifact uses a synthetic canary included in the prompt context. "
-                  "It does not claim that the tested model memorized private training data. "
-                  "It establishes that, when a canary-bearing answer is produced, the API "
-                  "can also expose token-level confidence and top-alternative tokens."
+                  "This is an account- and date-specific compatibility sweep. The OpenAI model list "
+                  "and parameter support can change over time. The artifact records the exact timestamp, "
+                  "model IDs, HTTP statuses, and returned model names."
               ),
-              "synthetic_true_canary": TRUE_CANARY,
-              "template_matched_decoys": TEMPLATE_MATCHED_DECOYS,
-              "experiment_a_direct_canary_reconstruction": {
-                  "http_status": status_a,
-                  "latency_ms": latency_a_ms,
-                  "generated_text": generated_a,
-                  "exact_reconstruction": exact_reconstruction_a,
-                  "sequence_logprob_sum": seq_lp_a,
-                  "generated_token_count": token_count_a,
-                  "mean_token_logprob": seq_lp_a / token_count_a if token_count_a else None,
-                  "token_level_observations": rows_a,
-                  "suffix_focused_observations": suffix_focused_rows(rows_a),
+              "model_counts": {
+                  "all_models_returned_by_models_endpoint": len(all_model_ids),
+                  "candidate_models_tested": len(candidate_model_ids),
+                  "supported_chat_completions_logprobs": len(supported),
+                  "unsupported_or_failed": len(unsupported),
               },
-              "experiment_b_near_neighbor_decoy_selection": {
-                  "http_status": status_b,
-                  "latency_ms": latency_b_ms,
-                  "generated_text": generated_b,
-                  "exact_selection_of_true_canary": exact_selection_b,
-                  "sequence_logprob_sum": seq_lp_b,
-                  "generated_token_count": token_count_b,
-                  "mean_token_logprob": seq_lp_b / token_count_b if token_count_b else None,
-                  "token_level_observations": rows_b,
-                  "suffix_focused_observations": suffix_focused_rows(rows_b),
-              },
-              "paper_ready_takeaway": (
-                  "The API response is not limited to the emitted string. It can include "
-                  "a token-by-token probability transcript, including ranked near-miss "
-                  "tokens. For secret-shaped canaries, this exposes confidence information "
-                  "around reconstruction or selection that an attacker could use adaptively, "
-                  "even when a plain-text-only API would reveal less."
+              "latest_supported_by_models_endpoint_created_timestamp": latest_supported_by_created,
+              "supported_models": supported_sorted_by_created,
+              "unsupported_models": sorted(
+                  unsupported,
+                  key=lambda r: r.get("model_id") or "",
               ),
+              "all_model_ids_returned_by_models_endpoint": all_model_ids,
           }
 
           os.makedirs("artifacts", exist_ok=True)
 
           with open(
-              "artifacts/canary_logprob_side_channel_measurement.json",
+              "artifacts/openai_logprobs_model_sweep.json",
               "w",
               encoding="utf-8",
           ) as f:
-              json.dump(result, f, indent=2, ensure_ascii=False)
+              json.dump(artifact, f, indent=2, ensure_ascii=False)
 
-          print("USENIX_CANARY_LOGPROB_SIDE_CHANNEL_ARTIFACT")
-          print(json.dumps(result, indent=2, ensure_ascii=False))
+          print("OPENAI_LOGPROBS_MODEL_SWEEP_SUMMARY")
+          print(json.dumps({
+              "timestamp_utc": artifact["timestamp_utc"],
+              "candidate_models_tested": len(candidate_model_ids),
+              "supported_count": len(supported),
+              "unsupported_count": len(unsupported),
+              "latest_supported_model_id": (
+                  latest_supported_by_created.get("model_id")
+                  if latest_supported_by_created else None
+              ),
+              "latest_supported_model_returned": (
+                  latest_supported_by_created.get("model_returned")
+                  if latest_supported_by_created else None
+              ),
+              "supported_model_ids": [r["model_id"] for r in supported_sorted_by_created],
+          }, indent=2, ensure_ascii=False))
           PY
 
-      - name: Upload measurement artifact
+      - name: Upload model sweep artifact
         uses: actions/upload-artifact@v4
         with:
-          name: canary-logprob-side-channel-measurement
-          path: artifacts/canary_logprob_side_channel_measurement.json
+          name: openai-logprobs-model-sweep
+          path: artifacts/openai_logprobs_model_sweep.json
           if-no-files-found: error
