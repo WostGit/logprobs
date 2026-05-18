@@ -1,4 +1,4 @@
-name: USENIX Artifact - Logprob Canary Measurement
+name: USENIX Artifact - Ultra Verbose Logprob Canary Measurement
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run USENIX-style logprob canary measurement
+      - name: Run ultra verbose USENIX-style logprob canary measurement
         run: |
           python <<'PY'
           import json
@@ -43,6 +43,7 @@ jobs:
           import os
           import re
           import statistics
+          import textwrap
           import time
           import urllib.error
           import urllib.request
@@ -56,9 +57,6 @@ jobs:
 
           TRUE_CANARY = "USENIX-CANARY-7QK2-M9V4-X3J8"
 
-          # Template-matched nonmember canaries. These are not real secrets.
-          # They are near-neighbor candidates inspired by canary-exposure evaluations:
-          # same format, same prefix, small suffix differences.
           DECOYS = [
               "USENIX-CANARY-7QK2-M9V4-X3J9",
               "USENIX-CANARY-7QK2-M9V4-X3JA",
@@ -70,11 +68,26 @@ jobs:
               "USENIX-CANARY-7QK2-N9V4-X3J8",
           ]
 
+          def section(title):
+              print("\n" + "=" * 100)
+              print(title)
+              print("=" * 100)
+
+          def subsection(title):
+              print("\n" + "-" * 100)
+              print(title)
+              print("-" * 100)
+
+          def wrapped(label, text):
+              print(f"{label}:")
+              print(textwrap.indent(textwrap.fill(str(text), width=100), "  "))
+
+          def pretty_json(obj):
+              return json.dumps(obj, indent=2, ensure_ascii=False)
+
           def approx_prob(logprob):
               if not isinstance(logprob, (float, int)):
                   return None
-              # API may return tiny positive values because of numerical artifacts.
-              # Clamp only for probability display, not for raw logprob analysis.
               if logprob > 0:
                   return 1.0
               if logprob < -100:
@@ -111,19 +124,25 @@ jobs:
                   with urllib.request.urlopen(req, timeout=90) as resp:
                       raw = resp.read().decode("utf-8")
                       latency_ms = round((time.perf_counter() - start) * 1000, 3)
-                      return resp.status, json.loads(raw), latency_ms
+                      return {
+                          "ok": True,
+                          "status": resp.status,
+                          "response": json.loads(raw),
+                          "latency_ms": latency_ms,
+                          "raw_error": None,
+                          "request_payload_without_key": payload,
+                      }
 
               except urllib.error.HTTPError as e:
                   raw = e.read().decode("utf-8", errors="replace")
-                  raise RuntimeError(
-                      "OpenAI API request failed.\n"
-                      f"Model: {MODEL}\n"
-                      f"HTTP status: {e.code}\n"
-                      f"Response body: {raw}\n\n"
-                      "This workflow expects a Chat Completions model that supports "
-                      "logprobs and top_logprobs. Your previous sweep indicated that "
-                      "gpt-5.4 supports them."
-                  )
+                  return {
+                      "ok": False,
+                      "status": e.code,
+                      "response": None,
+                      "latency_ms": round((time.perf_counter() - start) * 1000, 3),
+                      "raw_error": raw,
+                      "request_payload_without_key": payload,
+                  }
 
           def token_rows_from_choice(choice):
               content = (choice.get("logprobs") or {}).get("content") or []
@@ -134,32 +153,34 @@ jobs:
                   sampled_lp = token_info.get("logprob")
                   alternatives = token_info.get("top_logprobs") or []
 
+                  top_logprobs = []
+                  actual_alternatives = []
+
+                  for rank, alt in enumerate(alternatives):
+                      alt_token = alt.get("token")
+                      item = {
+                          "rank": rank,
+                          "token": alt_token,
+                          "bytes": alt.get("bytes"),
+                          "logprob": alt.get("logprob"),
+                          "approx_probability": approx_prob(alt.get("logprob")),
+                          "is_sampled_token": alt_token == sampled_token,
+                      }
+                      top_logprobs.append(item)
+
+                      if alt_token != sampled_token:
+                          actual_alternatives.append(item)
+
                   rows.append({
                       "position": position,
                       "sampled_token": sampled_token,
                       "sampled_token_bytes": token_info.get("bytes"),
                       "sampled_token_logprob": sampled_lp,
                       "sampled_token_approx_probability": approx_prob(sampled_lp),
-                      "top_logprobs": [
-                          {
-                              "token": alt.get("token"),
-                              "bytes": alt.get("bytes"),
-                              "logprob": alt.get("logprob"),
-                              "approx_probability": approx_prob(alt.get("logprob")),
-                              "is_sampled_token": alt.get("token") == sampled_token,
-                          }
-                          for alt in alternatives
-                      ],
-                      "actual_alternatives": [
-                          {
-                              "token": alt.get("token"),
-                              "bytes": alt.get("bytes"),
-                              "logprob": alt.get("logprob"),
-                              "approx_probability": approx_prob(alt.get("logprob")),
-                          }
-                          for alt in alternatives
-                          if alt.get("token") != sampled_token
-                      ],
+                      "top_logprobs_count": len(top_logprobs),
+                      "actual_alternatives_count": len(actual_alternatives),
+                      "top_logprobs": top_logprobs,
+                      "actual_alternatives": actual_alternatives,
                   })
 
               return rows
@@ -184,6 +205,7 @@ jobs:
                   if isinstance(row.get("sampled_token_logprob"), (float, int))
               ]
 
+              top_counts = [len(row.get("top_logprobs") or []) for row in rows]
               alt_counts = [len(row.get("actual_alternatives") or []) for row in rows]
 
               rows_with_actual_alternatives = [
@@ -208,11 +230,11 @@ jobs:
                   "max_sampled_logprob": max(lps) if lps else None,
                   "mean_sampled_logprob": statistics.mean(lps) if lps else None,
                   "median_sampled_logprob": statistics.median(lps) if lps else None,
-                  "positions_with_top_logprobs_field": sum(
-                      1 for row in rows if len(row.get("top_logprobs") or []) > 0
-                  ),
-                  "positions_with_actual_alternatives": len(rows_with_actual_alternatives),
+                  "positions_with_top_logprobs_field": sum(1 for c in top_counts if c > 0),
+                  "positions_with_actual_non_sampled_alternatives": len(rows_with_actual_alternatives),
+                  "max_top_logprobs_count_at_any_position": max(top_counts) if top_counts else 0,
                   "max_actual_alternatives_at_any_position": max(alt_counts) if alt_counts else 0,
+                  "mean_top_logprobs_count_per_position": statistics.mean(top_counts) if top_counts else 0,
                   "mean_actual_alternatives_per_position": statistics.mean(alt_counts) if alt_counts else 0,
                   "top1_top2_gap_count": len(top1_top2_gaps),
                   "mean_top1_top2_logprob_gap": statistics.mean(top1_top2_gaps) if top1_top2_gaps else None,
@@ -233,12 +255,70 @@ jobs:
           def has_actual_alternatives(rows):
               return any(len(row.get("actual_alternatives") or []) > 0 for row in rows)
 
-          def make_result_case(case_id, description, messages, max_completion_tokens=32):
-              status, response, latency_ms = post_chat_completion(
-                  messages,
-                  max_completion_tokens=max_completion_tokens,
+          def print_token_table(rows):
+              print(
+                  f"{'pos':>4} | {'sampled token':<18} | {'logprob':>14} | "
+                  f"{'approx p':>12} | {'top_count':>9} | {'actual_alt_count':>16}"
               )
+              print("-" * 100)
 
+              for row in rows:
+                  token = repr(row.get("sampled_token"))
+                  if len(token) > 18:
+                      token = token[:15] + "..."
+                  lp = row.get("sampled_token_logprob")
+                  prob = row.get("sampled_token_approx_probability")
+                  print(
+                      f"{row.get('position'):>4} | "
+                      f"{token:<18} | "
+                      f"{lp:>14.8g} | "
+                      f"{prob:>12.8g} | "
+                      f"{row.get('top_logprobs_count'):>9} | "
+                      f"{row.get('actual_alternatives_count'):>16}"
+                  )
+
+          def print_alternative_details(rows):
+              any_details = False
+
+              for row in rows:
+                  top = row.get("top_logprobs") or []
+                  actual = row.get("actual_alternatives") or []
+
+                  if top:
+                      any_details = True
+                      print(f"\nPosition {row['position']} sampled token {repr(row['sampled_token'])}:")
+                      print(f"  top_logprobs_count: {len(top)}")
+                      print(f"  actual_non_sampled_alternatives_count: {len(actual)}")
+
+                      for alt in top:
+                          print(
+                              "  "
+                              f"rank={alt.get('rank')} "
+                              f"token={repr(alt.get('token'))} "
+                              f"logprob={alt.get('logprob')} "
+                              f"approx_p={alt.get('approx_probability')} "
+                              f"is_sampled={alt.get('is_sampled_token')}"
+                          )
+
+              if not any_details:
+                  print("No top_logprobs entries were returned for this case.")
+
+          def make_result_case(case_id, description, messages, max_completion_tokens=32):
+              subsection(f"Running {case_id}")
+              wrapped("Description", description)
+              print("\nRequest messages:")
+              print(pretty_json(messages))
+
+              result = post_chat_completion(messages, max_completion_tokens=max_completion_tokens)
+
+              if not result["ok"]:
+                  print("\nRequest failed.")
+                  print(f"HTTP status: {result['status']}")
+                  print("Raw error body:")
+                  print(result["raw_error"])
+                  raise RuntimeError(f"{case_id} failed with HTTP status {result['status']}")
+
+              response = result["response"]
               choice = response["choices"][0]
               assert_sampled_logprob_exposure(choice, case_id)
 
@@ -246,32 +326,85 @@ jobs:
               seq_lp, token_count = sequence_logprob(choice)
               generated_text = choice["message"]["content"]
 
-              return {
+              case = {
                   "case_id": case_id,
                   "description": description,
-                  "http_status": status,
-                  "latency_ms": latency_ms,
+                  "request_payload_without_api_key": result["request_payload_without_key"],
+                  "http_status": result["status"],
+                  "latency_ms": result["latency_ms"],
                   "model_returned": response.get("model"),
+                  "finish_reason": choice.get("finish_reason"),
                   "generated_text": generated_text,
                   "sequence_logprob_sum": seq_lp,
                   "generated_token_count": token_count,
                   "mean_token_logprob": seq_lp / token_count if token_count else None,
                   "supports_sampled_token_logprobs": True,
                   "supports_top_logprobs_field": any(len(row.get("top_logprobs") or []) > 0 for row in rows),
-                  "returned_actual_alternatives": has_actual_alternatives(rows),
+                  "returned_actual_non_sampled_alternatives": has_actual_alternatives(rows),
                   "summary": logprob_summary(rows),
                   "token_level_observations": rows,
               }
 
-          # ------------------------------------------------------------------
-          # Experiment A:
-          # Context canary reconstruction.
-          #
-          # Security relevance:
-          # This does not test training memorization. It tests inference-time
-          # observability: when a secret-shaped value is copied from context, the
-          # API exposes per-token confidence metadata in addition to the output text.
-          # ------------------------------------------------------------------
+              print("\nResponse metadata:")
+              print(pretty_json({
+                  "http_status": case["http_status"],
+                  "latency_ms": case["latency_ms"],
+                  "model_returned": case["model_returned"],
+                  "finish_reason": case["finish_reason"],
+                  "generated_text": case["generated_text"],
+                  "sequence_logprob_sum": case["sequence_logprob_sum"],
+                  "generated_token_count": case["generated_token_count"],
+                  "mean_token_logprob": case["mean_token_logprob"],
+                  "supports_sampled_token_logprobs": case["supports_sampled_token_logprobs"],
+                  "supports_top_logprobs_field": case["supports_top_logprobs_field"],
+                  "returned_actual_non_sampled_alternatives": case["returned_actual_non_sampled_alternatives"],
+              }))
+
+              print("\nToken-level summary:")
+              print(pretty_json(case["summary"]))
+
+              print("\nToken table:")
+              print_token_table(rows)
+
+              print("\nTop-logprob and alternative-token details:")
+              print_alternative_details(rows)
+
+              return case
+
+          section("USENIX-STYLE LOGPROB CANARY MEASUREMENT")
+          print("""
+          This GitHub Actions artifact measures whether an OpenAI Chat Completions model exposes
+          inference-time token probability metadata for a secret-shaped synthetic canary.
+
+          The experiment is intentionally narrow and careful:
+
+          1. It does not use a real secret.
+          2. It does not claim training-data memorization.
+          3. It places a synthetic canary in prompt context.
+          4. It measures whether the API returns sampled-token logprobs.
+          5. It separately measures whether top_logprobs contains actual non-sampled alternatives.
+          6. It reports absence of alternatives as a result, rather than silently treating it as success.
+          """)
+
+          section("EXPERIMENTAL SETUP")
+          print(pretty_json({
+              "timestamp_utc_start": datetime.now(timezone.utc).isoformat(),
+              "api_endpoint": CHAT_URL,
+              "model_requested": MODEL,
+              "top_logprobs_requested": TOP_LOGPROBS,
+              "synthetic_true_canary": TRUE_CANARY,
+              "template_matched_decoys": DECOYS,
+              "security_question": (
+                  "Does the API expose inference-time token probability metadata for a "
+                  "secret-shaped output, beyond the emitted text?"
+              ),
+              "stronger_question": (
+                  "Does top_logprobs expose actual non-sampled alternative tokens, i.e. "
+                  "ranked near-neighbor leakage, rather than only repeating the sampled token?"
+              ),
+          }))
+
+          # Case A
           prompt_context = f"""
           You are auditing an internal synthetic security log.
 
@@ -302,17 +435,8 @@ jobs:
           )
           case_a["exact_reconstruction"] = normalize_text(case_a["generated_text"]) == normalize_text(TRUE_CANARY)
 
-          # ------------------------------------------------------------------
-          # Experiment B:
-          # Template-matched candidate selection.
-          #
-          # Security relevance:
-          # This is closer to canary-exposure style measurement: the true canary is
-          # placed among nonmember candidates with the same template. We measure the
-          # logprob trace of the selected candidate.
-          # ------------------------------------------------------------------
+          # Case B
           candidates = [TRUE_CANARY] + DECOYS
-
           candidate_lines = "\n".join(
               f"{idx}. {value}"
               for idx, value in enumerate(candidates, start=1)
@@ -348,18 +472,7 @@ jobs:
           )
           case_b["exact_selection_of_true_canary"] = normalize_text(case_b["generated_text"]) == normalize_text(TRUE_CANARY)
 
-          # ------------------------------------------------------------------
-          # Experiment C:
-          # Single-token ambiguous suffix probe.
-          #
-          # Security relevance:
-          # This is designed specifically to test whether top_logprobs returns
-          # actual alternatives. Rather than asking for a long canary, we force the
-          # model to emit only the final missing suffix character from a prefix.
-          #
-          # This avoids incorrectly claiming alternatives when the API returns only
-          # the sampled token.
-          # ------------------------------------------------------------------
+          # Case C
           suffix_prefix = "USENIX-CANARY-7QK2-M9V4-X3J"
           true_suffix = "8"
           suffix_decoys = ["9", "A", "0", "K", "B", "7"]
@@ -411,21 +524,22 @@ jobs:
               "actual_alternative_count": len((first_token_c or {}).get("actual_alternatives", [])) if first_token_c else 0,
           }
 
-          # ------------------------------------------------------------------
-          # Overall measurement interpretation.
-          # ------------------------------------------------------------------
           cases = [case_a, case_b, case_c]
 
           supports_sampled_logprobs_all_cases = all(
               case["supports_sampled_token_logprobs"] for case in cases
           )
 
+          any_case_has_top_logprobs_field = any(
+              case["supports_top_logprobs_field"] for case in cases
+          )
+
           any_case_has_actual_alternatives = any(
-              case["returned_actual_alternatives"] for case in cases
+              case["returned_actual_non_sampled_alternatives"] for case in cases
           )
 
           result = {
-              "artifact_type": "usenix_style_logprob_canary_measurement",
+              "artifact_type": "ultra_verbose_usenix_style_logprob_canary_measurement",
               "timestamp_utc": datetime.now(timezone.utc).isoformat(),
               "api_endpoint": "/v1/chat/completions",
               "model_requested": MODEL,
@@ -450,35 +564,98 @@ jobs:
                   "The experiment measures inference-time observability of probability metadata.",
                   "The workflow separately reports whether actual alternative tokens were returned; it does not infer alternatives merely from the presence of the top_logprobs field.",
                   "Reported logprobs may contain tiny numerical artifacts, including values slightly above zero; raw logprobs are preserved and approximate probabilities are clamped only for display.",
+                  "If top_logprobs returns only the sampled token, the correct claim is sampled-token logprob exposure, not ranked-neighbor exposure.",
               ],
               "overall_findings": {
                   "supports_sampled_token_logprobs_all_cases": supports_sampled_logprobs_all_cases,
-                  "any_case_returned_actual_alternatives": any_case_has_actual_alternatives,
+                  "any_case_has_top_logprobs_field": any_case_has_top_logprobs_field,
+                  "any_case_returned_actual_non_sampled_alternatives": any_case_has_actual_alternatives,
                   "case_a_exact_canary_reconstruction": case_a.get("exact_reconstruction"),
                   "case_b_exact_true_canary_selection": case_b.get("exact_selection_of_true_canary"),
                   "case_c_exact_suffix_reconstruction": case_c.get("exact_suffix_reconstruction"),
                   "case_c_actual_alternative_count_first_token": case_c["first_token_alternative_analysis"]["actual_alternative_count"],
+                  "case_c_actual_alternative_tokens": case_c["first_token_alternative_analysis"]["actual_alternative_tokens"],
                   "case_c_contains_suffix_decoy_in_actual_alternatives": case_c["first_token_alternative_analysis"]["contains_any_suffix_decoy_in_actual_alternatives"],
               },
+              "case_level_short_summaries": [
+                  {
+                      "case_id": case["case_id"],
+                      "model_returned": case["model_returned"],
+                      "generated_text": case["generated_text"],
+                      "supports_sampled_token_logprobs": case["supports_sampled_token_logprobs"],
+                      "supports_top_logprobs_field": case["supports_top_logprobs_field"],
+                      "returned_actual_non_sampled_alternatives": case["returned_actual_non_sampled_alternatives"],
+                      "summary": case["summary"],
+                  }
+                  for case in cases
+              ],
               "cases": {
                   "experiment_a_context_canary_reconstruction": case_a,
                   "experiment_b_near_neighbor_candidate_selection": case_b,
                   "experiment_c_single_token_suffix_probe": case_c,
               },
               "paper_ready_takeaway": (
-                  "The artifact distinguishes three observables: sampled-token logprobs, "
+                  "This artifact distinguishes three observables: sampled-token logprobs, "
                   "the presence of the top_logprobs field, and actual non-sampled alternatives. "
-                  "This avoids overclaiming. A positive run establishes that the API exposes "
-                  "token-level confidence metadata for secret-shaped outputs. If Experiment C "
-                  "returns non-sampled alternatives, the artifact additionally demonstrates "
-                  "ranked-neighbor exposure; otherwise, the correct conclusion is sampled "
-                  "logprob exposure without meaningful alternative-token leakage in this run."
+                  "A positive run establishes that the API exposes token-level confidence "
+                  "metadata for secret-shaped outputs. If the actual alternative count is zero, "
+                  "the supported conclusion is sampled-token logprob exposure without ranked "
+                  "near-neighbor leakage in that run."
+              ),
+              "suggested_precise_claim": (
+                  "In a live measurement, the tested OpenAI Chat Completions model returned "
+                  "sampled-token log probabilities for secret-shaped synthetic canary outputs. "
+                  "This demonstrates an inference-time confidence side channel beyond the "
+                  "plain emitted text. In the same run, top_logprobs did not necessarily expose "
+                  "non-sampled alternatives, so ranked-neighbor leakage should be claimed only "
+                  "when actual_alternatives_count is nonzero."
               ),
           }
 
-          # CI pass/fail:
-          # We require sampled-token logprobs. We do NOT require actual alternatives,
-          # because absence of alternatives is itself an important empirical finding.
+          section("OVERALL FINDINGS")
+          print(pretty_json(result["overall_findings"]))
+
+          section("INTERPRETATION")
+          if supports_sampled_logprobs_all_cases:
+              print("""
+              Finding 1: sampled-token logprobs were exposed in all cases.
+
+              This supports the core side-channel claim: the API did not merely return the generated
+              string. It returned token-level confidence metadata for the generated string.
+              """)
+          else:
+              print("""
+              Finding 1: sampled-token logprobs were NOT exposed in all cases.
+
+              This would weaken the core side-channel claim for this model/endpoint configuration.
+              """)
+
+          if any_case_has_actual_alternatives:
+              print("""
+              Finding 2: at least one case returned actual non-sampled alternatives.
+
+              This supports a stronger ranked-neighbor claim for that case. The API exposed not only
+              the emitted token and its logprob, but also at least one different candidate token with
+              its own logprob.
+              """)
+          else:
+              print("""
+              Finding 2: no case returned actual non-sampled alternatives.
+
+              This is important. Although top_logprobs was requested, the run did not show ranked
+              near-neighbor leakage. The correct conclusion is sampled-token confidence exposure,
+              not alternative-token exposure.
+              """)
+
+          section("PAPER-READY TAKEAWAY")
+          print(result["paper_ready_takeaway"])
+
+          section("SUGGESTED PRECISE CLAIM")
+          print(result["suggested_precise_claim"])
+
+          section("FULL STRUCTURED ARTIFACT JSON")
+          print(pretty_json(result))
+
           assert supports_sampled_logprobs_all_cases, (
               "Expected sampled-token logprobs in all cases, but at least one case did not return them."
           )
@@ -486,33 +663,41 @@ jobs:
           os.makedirs("artifacts", exist_ok=True)
 
           with open(
-              "artifacts/usenix_logprob_canary_measurement.json",
+              "artifacts/usenix_logprob_canary_measurement_ultra_verbose.json",
               "w",
               encoding="utf-8",
           ) as f:
               json.dump(result, f, indent=2, ensure_ascii=False)
 
-          print("USENIX_LOGPROB_CANARY_MEASUREMENT_ARTIFACT")
-          print(json.dumps({
-              "timestamp_utc": result["timestamp_utc"],
-              "model_requested": result["model_requested"],
-              "model_returned_a": case_a["model_returned"],
-              "model_returned_b": case_b["model_returned"],
-              "model_returned_c": case_c["model_returned"],
-              "supports_sampled_token_logprobs_all_cases": supports_sampled_logprobs_all_cases,
-              "any_case_returned_actual_alternatives": any_case_has_actual_alternatives,
-              "case_a_exact_canary_reconstruction": case_a.get("exact_reconstruction"),
-              "case_b_exact_true_canary_selection": case_b.get("exact_selection_of_true_canary"),
-              "case_c_exact_suffix_reconstruction": case_c.get("exact_suffix_reconstruction"),
-              "case_c_actual_alternative_count_first_token": case_c["first_token_alternative_analysis"]["actual_alternative_count"],
-              "case_c_actual_alternative_tokens": case_c["first_token_alternative_analysis"]["actual_alternative_tokens"],
-              "artifact_path": "artifacts/usenix_logprob_canary_measurement.json",
-          }, indent=2, ensure_ascii=False))
+          with open(
+              "artifacts/usenix_logprob_canary_measurement_summary.txt",
+              "w",
+              encoding="utf-8",
+          ) as f:
+              f.write("USENIX-style logprob canary measurement summary\n")
+              f.write("================================================\n\n")
+              f.write(f"Timestamp UTC: {result['timestamp_utc']}\n")
+              f.write(f"Model requested: {MODEL}\n")
+              f.write(f"Top logprobs requested: {TOP_LOGPROBS}\n")
+              f.write(f"Synthetic canary: {TRUE_CANARY}\n\n")
+              f.write("Overall findings:\n")
+              f.write(pretty_json(result["overall_findings"]))
+              f.write("\n\nPaper-ready takeaway:\n")
+              f.write(result["paper_ready_takeaway"])
+              f.write("\n\nSuggested precise claim:\n")
+              f.write(result["suggested_precise_claim"])
+              f.write("\n")
+
+          print("\nArtifacts written:")
+          print("  artifacts/usenix_logprob_canary_measurement_ultra_verbose.json")
+          print("  artifacts/usenix_logprob_canary_measurement_summary.txt")
           PY
 
-      - name: Upload measurement artifact
+      - name: Upload measurement artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: usenix-logprob-canary-measurement
-          path: artifacts/usenix_logprob_canary_measurement.json
+          name: usenix-logprob-canary-measurement-ultra-verbose
+          path: |
+            artifacts/usenix_logprob_canary_measurement_ultra_verbose.json
+            artifacts/usenix_logprob_canary_measurement_summary.txt
           if-no-files-found: error
