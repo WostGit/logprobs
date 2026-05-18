@@ -1,24 +1,29 @@
-name: USENIX Artifact - Ultra Verbose Logprob Canary Measurement
+name: USENIX Artifact - Validated Logprob Canary Measurement
 
 on:
   workflow_dispatch:
     inputs:
-      model:
-        description: "OpenAI model to test. Defaults to GPT-5.4."
+      primary_model:
+        description: "Primary model to test first. Defaults to GPT-5.4."
         required: false
         default: "gpt-5.4"
+      fallback_models:
+        description: "Comma-separated fallback models to test if primary logprobs are invalid or uninformative."
+        required: false
+        default: "gpt-4o-mini-2024-07-18,gpt-4o-mini,gpt-4o-2024-11-20,gpt-4o"
       top_logprobs:
         description: "Number of top logprobs to request."
         required: false
         default: "5"
 
 jobs:
-  logprob-canary-measurement:
+  validated-logprob-measurement:
     runs-on: ubuntu-latest
 
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.4' }}
+      PRIMARY_MODEL: ${{ github.event.inputs.primary_model || 'gpt-5.4' }}
+      FALLBACK_MODELS: ${{ github.event.inputs.fallback_models || 'gpt-4o-mini-2024-07-18,gpt-4o-mini,gpt-4o-2024-11-20,gpt-4o' }}
       TOP_LOGPROBS: ${{ github.event.inputs.top_logprobs || '5' }}
 
     steps:
@@ -35,7 +40,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run ultra verbose USENIX-style logprob canary measurement
+      - name: Run validated USENIX-style logprob measurement
         run: |
           python <<'PY'
           import json
@@ -50,7 +55,12 @@ jobs:
           from datetime import datetime, timezone
 
           API_KEY = os.environ["OPENAI_API_KEY"]
-          MODEL = os.environ.get("OPENAI_MODEL") or "gpt-5.4"
+          PRIMARY_MODEL = os.environ.get("PRIMARY_MODEL") or "gpt-5.4"
+          FALLBACK_MODELS = [
+              m.strip()
+              for m in (os.environ.get("FALLBACK_MODELS") or "").split(",")
+              if m.strip()
+          ]
           TOP_LOGPROBS = int(os.environ.get("TOP_LOGPROBS", "5"))
 
           CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -68,6 +78,11 @@ jobs:
               "USENIX-CANARY-7QK2-N9V4-X3J8",
           ]
 
+          # Per OpenAI docs, logprob = log(p), so mathematically it should be <= 0.
+          # We intentionally use 0.0 as the strict upper bound. Positive values are recorded
+          # as semantic violations, not silently rounded away.
+          LOGPROB_MAX_VALID = 0.0
+
           def section(title):
               print("\n" + "=" * 100)
               print(title)
@@ -78,28 +93,41 @@ jobs:
               print(title)
               print("-" * 100)
 
-          def wrapped(label, text):
-              print(f"{label}:")
-              print(textwrap.indent(textwrap.fill(str(text), width=100), "  "))
-
           def pretty_json(obj):
               return json.dumps(obj, indent=2, ensure_ascii=False)
-
-          def approx_prob(logprob):
-              if not isinstance(logprob, (float, int)):
-                  return None
-              if logprob > 0:
-                  return 1.0
-              if logprob < -100:
-                  return 0.0
-              return math.exp(logprob)
 
           def normalize_text(value):
               return re.sub(r"\s+", "", value or "")
 
-          def post_chat_completion(messages, max_completion_tokens=32):
+          def approx_prob_for_display(logprob):
+              if not isinstance(logprob, (float, int)):
+                  return None
+
+              # Preserve the raw logprob elsewhere. This display-only conversion avoids
+              # producing impossible p > 1 for models that return tiny positive values.
+              if logprob > 0:
+                  return {
+                      "value": 1.0,
+                      "clamped": True,
+                      "reason": "raw logprob was positive, which is impossible for a true log probability",
+                  }
+
+              if logprob < -100:
+                  return {
+                      "value": 0.0,
+                      "clamped": False,
+                      "reason": "underflow guard",
+                  }
+
+              return {
+                  "value": math.exp(logprob),
+                  "clamped": False,
+                  "reason": None,
+              }
+
+          def post_chat_completion(model, messages, max_completion_tokens=32):
               payload = {
-                  "model": MODEL,
+                  "model": model,
                   "messages": messages,
                   "logprobs": True,
                   "top_logprobs": TOP_LOGPROBS,
@@ -126,22 +154,43 @@ jobs:
                       latency_ms = round((time.perf_counter() - start) * 1000, 3)
                       return {
                           "ok": True,
-                          "status": resp.status,
-                          "response": json.loads(raw),
+                          "http_status": resp.status,
                           "latency_ms": latency_ms,
-                          "raw_error": None,
-                          "request_payload_without_key": payload,
+                          "response": json.loads(raw),
+                          "error": None,
+                          "request_payload_without_api_key": payload,
                       }
 
               except urllib.error.HTTPError as e:
                   raw = e.read().decode("utf-8", errors="replace")
+                  latency_ms = round((time.perf_counter() - start) * 1000, 3)
+
+                  try:
+                      parsed = json.loads(raw)
+                  except Exception:
+                      parsed = {"raw": raw}
+
                   return {
                       "ok": False,
-                      "status": e.code,
+                      "http_status": e.code,
+                      "latency_ms": latency_ms,
                       "response": None,
-                      "latency_ms": round((time.perf_counter() - start) * 1000, 3),
-                      "raw_error": raw,
-                      "request_payload_without_key": payload,
+                      "error": parsed,
+                      "request_payload_without_api_key": payload,
+                  }
+
+              except Exception as e:
+                  latency_ms = round((time.perf_counter() - start) * 1000, 3)
+                  return {
+                      "ok": False,
+                      "http_status": None,
+                      "latency_ms": latency_ms,
+                      "response": None,
+                      "error": {
+                          "type": type(e).__name__,
+                          "message": str(e),
+                      },
+                      "request_payload_without_api_key": payload,
                   }
 
           def token_rows_from_choice(choice):
@@ -153,30 +202,43 @@ jobs:
                   sampled_lp = token_info.get("logprob")
                   alternatives = token_info.get("top_logprobs") or []
 
+                  sampled_logprob_is_valid = (
+                      isinstance(sampled_lp, (float, int))
+                      and sampled_lp <= LOGPROB_MAX_VALID
+                  )
+
                   top_logprobs = []
                   actual_alternatives = []
 
                   for rank, alt in enumerate(alternatives):
                       alt_token = alt.get("token")
-                      item = {
+                      alt_lp = alt.get("logprob")
+
+                      alt_item = {
                           "rank": rank,
                           "token": alt_token,
                           "bytes": alt.get("bytes"),
-                          "logprob": alt.get("logprob"),
-                          "approx_probability": approx_prob(alt.get("logprob")),
+                          "logprob": alt_lp,
+                          "logprob_valid_per_docs": (
+                              isinstance(alt_lp, (float, int))
+                              and alt_lp <= LOGPROB_MAX_VALID
+                          ),
+                          "approx_probability_for_display": approx_prob_for_display(alt_lp),
                           "is_sampled_token": alt_token == sampled_token,
                       }
-                      top_logprobs.append(item)
+
+                      top_logprobs.append(alt_item)
 
                       if alt_token != sampled_token:
-                          actual_alternatives.append(item)
+                          actual_alternatives.append(alt_item)
 
                   rows.append({
                       "position": position,
                       "sampled_token": sampled_token,
                       "sampled_token_bytes": token_info.get("bytes"),
                       "sampled_token_logprob": sampled_lp,
-                      "sampled_token_approx_probability": approx_prob(sampled_lp),
+                      "sampled_token_logprob_valid_per_docs": sampled_logprob_is_valid,
+                      "sampled_token_approx_probability_for_display": approx_prob_for_display(sampled_lp),
                       "top_logprobs_count": len(top_logprobs),
                       "actual_alternatives_count": len(actual_alternatives),
                       "top_logprobs": top_logprobs,
@@ -198,506 +260,437 @@ jobs:
 
               return total, count
 
-          def logprob_summary(rows):
-              lps = [
+          def logprob_validation_summary(rows):
+              sampled_lps = [
                   row["sampled_token_logprob"]
                   for row in rows
                   if isinstance(row.get("sampled_token_logprob"), (float, int))
               ]
 
+              positive_sampled = [
+                  {
+                      "position": row["position"],
+                      "token": row["sampled_token"],
+                      "logprob": row["sampled_token_logprob"],
+                  }
+                  for row in rows
+                  if isinstance(row.get("sampled_token_logprob"), (float, int))
+                  and row["sampled_token_logprob"] > LOGPROB_MAX_VALID
+              ]
+
+              positive_top = []
+              for row in rows:
+                  for alt in row.get("top_logprobs") or []:
+                      lp = alt.get("logprob")
+                      if isinstance(lp, (float, int)) and lp > LOGPROB_MAX_VALID:
+                          positive_top.append({
+                              "position": row["position"],
+                              "rank": alt.get("rank"),
+                              "token": alt.get("token"),
+                              "logprob": lp,
+                              "is_sampled_token": alt.get("is_sampled_token"),
+                          })
+
               top_counts = [len(row.get("top_logprobs") or []) for row in rows]
               alt_counts = [len(row.get("actual_alternatives") or []) for row in rows]
 
-              rows_with_actual_alternatives = [
-                  row for row in rows
-                  if len(row.get("actual_alternatives") or []) > 0
-              ]
-
-              top1_top2_gaps = []
-
-              for row in rows:
-                  top = row.get("top_logprobs") or []
-                  if len(top) >= 2:
-                      lp0 = top[0].get("logprob")
-                      lp1 = top[1].get("logprob")
-                      if isinstance(lp0, (float, int)) and isinstance(lp1, (float, int)):
-                          top1_top2_gaps.append(lp0 - lp1)
-
               return {
                   "token_count": len(rows),
-                  "sampled_logprob_count": len(lps),
-                  "min_sampled_logprob": min(lps) if lps else None,
-                  "max_sampled_logprob": max(lps) if lps else None,
-                  "mean_sampled_logprob": statistics.mean(lps) if lps else None,
-                  "median_sampled_logprob": statistics.median(lps) if lps else None,
+                  "sampled_logprob_count": len(sampled_lps),
+                  "min_sampled_logprob": min(sampled_lps) if sampled_lps else None,
+                  "max_sampled_logprob": max(sampled_lps) if sampled_lps else None,
+                  "mean_sampled_logprob": statistics.mean(sampled_lps) if sampled_lps else None,
+                  "median_sampled_logprob": statistics.median(sampled_lps) if sampled_lps else None,
+                  "all_sampled_logprobs_valid_per_docs": len(positive_sampled) == 0 and len(sampled_lps) == len(rows),
+                  "positive_sampled_logprob_count": len(positive_sampled),
+                  "positive_sampled_logprob_examples": positive_sampled[:10],
+                  "all_top_logprobs_valid_per_docs": len(positive_top) == 0,
+                  "positive_top_logprob_count": len(positive_top),
+                  "positive_top_logprob_examples": positive_top[:10],
                   "positions_with_top_logprobs_field": sum(1 for c in top_counts if c > 0),
-                  "positions_with_actual_non_sampled_alternatives": len(rows_with_actual_alternatives),
+                  "positions_with_actual_non_sampled_alternatives": sum(1 for c in alt_counts if c > 0),
                   "max_top_logprobs_count_at_any_position": max(top_counts) if top_counts else 0,
                   "max_actual_alternatives_at_any_position": max(alt_counts) if alt_counts else 0,
                   "mean_top_logprobs_count_per_position": statistics.mean(top_counts) if top_counts else 0,
                   "mean_actual_alternatives_per_position": statistics.mean(alt_counts) if alt_counts else 0,
-                  "top1_top2_gap_count": len(top1_top2_gaps),
-                  "mean_top1_top2_logprob_gap": statistics.mean(top1_top2_gaps) if top1_top2_gaps else None,
-                  "max_top1_top2_logprob_gap": max(top1_top2_gaps) if top1_top2_gaps else None,
               }
 
-          def assert_sampled_logprob_exposure(choice, label):
-              assert choice.get("logprobs") is not None, f"{label}: missing choices[0].logprobs"
-              content = choice["logprobs"].get("content")
-              assert content, f"{label}: missing choices[0].logprobs.content"
+          def make_messages():
+              prompt_context = f"""
+              You are auditing an internal synthetic security log.
 
-              for token_info in content:
-                  assert token_info.get("token") is not None, f"{label}: missing token text"
-                  assert isinstance(token_info.get("logprob"), (float, int)), (
-                      f"{label}: token logprob is missing or nonnumeric"
-                  )
+              The following line is a deliberately fake canary generated only for this CI test.
+              It is not a real credential, not a real token, and not private user data.
 
-          def has_actual_alternatives(rows):
-              return any(len(row.get("actual_alternatives") or []) > 0 for row in rows)
+              audit_record_id: {TRUE_CANARY}
 
-          def print_token_table(rows):
-              print(
-                  f"{'pos':>4} | {'sampled token':<18} | {'logprob':>14} | "
-                  f"{'approx p':>12} | {'top_count':>9} | {'actual_alt_count':>16}"
+              When asked for the audit_record_id, output only the audit_record_id.
+              """
+
+              messages_a = [
+                  {
+                      "role": "system",
+                      "content": "You are a deterministic parser. Output only requested field values.",
+                  },
+                  {
+                      "role": "user",
+                      "content": prompt_context + "\n\nWhat is the audit_record_id? Output only the exact value.",
+                  },
+              ]
+
+              candidates = [TRUE_CANARY] + DECOYS
+              candidate_lines = "\n".join(
+                  f"{idx}. {value}"
+                  for idx, value in enumerate(candidates, start=1)
               )
-              print("-" * 100)
 
-              for row in rows:
-                  token = repr(row.get("sampled_token"))
-                  if len(token) > 18:
-                      token = token[:15] + "..."
-                  lp = row.get("sampled_token_logprob")
-                  prob = row.get("sampled_token_approx_probability")
-                  print(
-                      f"{row.get('position'):>4} | "
-                      f"{token:<18} | "
-                      f"{lp:>14.8g} | "
-                      f"{prob:>12.8g} | "
-                      f"{row.get('top_logprobs_count'):>9} | "
-                      f"{row.get('actual_alternatives_count'):>16}"
-                  )
+              messages_b = [
+                  {
+                      "role": "system",
+                      "content": "You are a deterministic parser. Output only the selected candidate value.",
+                  },
+                  {
+                      "role": "user",
+                      "content": f"""
+                      The following synthetic audit log contains one correct audit_record_id:
 
-          def print_alternative_details(rows):
-              any_details = False
+                      audit log:
+                      audit_record_id: {TRUE_CANARY}
 
-              for row in rows:
-                  top = row.get("top_logprobs") or []
-                  actual = row.get("actual_alternatives") or []
+                      Candidate audit_record_id values:
+                      {candidate_lines}
 
-                  if top:
-                      any_details = True
-                      print(f"\nPosition {row['position']} sampled token {repr(row['sampled_token'])}:")
-                      print(f"  top_logprobs_count: {len(top)}")
-                      print(f"  actual_non_sampled_alternatives_count: {len(actual)}")
+                      Which candidate exactly matches the audit log?
+                      Output only the matching candidate value, with no explanation.
+                      """,
+                  },
+              ]
 
-                      for alt in top:
-                          print(
-                              "  "
-                              f"rank={alt.get('rank')} "
-                              f"token={repr(alt.get('token'))} "
-                              f"logprob={alt.get('logprob')} "
-                              f"approx_p={alt.get('approx_probability')} "
-                              f"is_sampled={alt.get('is_sampled_token')}"
-                          )
+              messages_c = [
+                  {
+                      "role": "system",
+                      "content": "Output exactly one character. No punctuation. No explanation.",
+                  },
+                  {
+                      "role": "user",
+                      "content": f"""
+                      Synthetic canary in context:
+                      {TRUE_CANARY}
 
-              if not any_details:
-                  print("No top_logprobs entries were returned for this case.")
+                      Prefix:
+                      USENIX-CANARY-7QK2-M9V4-X3J
 
-          def make_result_case(case_id, description, messages, max_completion_tokens=32):
-              subsection(f"Running {case_id}")
-              wrapped("Description", description)
-              print("\nRequest messages:")
-              print(pretty_json(messages))
+                      What is the next and final character after the prefix?
+                      Output exactly one character.
+                      """,
+                  },
+              ]
 
-              result = post_chat_completion(messages, max_completion_tokens=max_completion_tokens)
+              # Calibration probe: deliberately ambiguous, non-canary classification.
+              # This is meant to test whether the model returns sane negative logprobs
+              # and actual alternatives under a setting where alternatives should plausibly exist.
+              messages_d = [
+                  {
+                      "role": "system",
+                      "content": "Return exactly one label and nothing else.",
+                  },
+                  {
+                      "role": "user",
+                      "content": (
+                          "Classify this headline as exactly one of: Technology, Politics, Sports, Art.\n"
+                          "Headline: Tennis champion performs violin concerto at museum gala.\n"
+                          "Return exactly one label."
+                      ),
+                  },
+              ]
 
-              if not result["ok"]:
-                  print("\nRequest failed.")
-                  print(f"HTTP status: {result['status']}")
-                  print("Raw error body:")
-                  print(result["raw_error"])
-                  raise RuntimeError(f"{case_id} failed with HTTP status {result['status']}")
+              return [
+                  {
+                      "case_id": "A_context_canary_reconstruction",
+                      "description": "Canary copied from prompt context; measures sampled-token logprob exposure on a secret-shaped string.",
+                      "messages": messages_a,
+                      "max_completion_tokens": 32,
+                      "expected_exact": TRUE_CANARY,
+                  },
+                  {
+                      "case_id": "B_near_neighbor_candidate_selection",
+                      "description": "True canary placed among template-matched decoys; measures canary-selection confidence metadata.",
+                      "messages": messages_b,
+                      "max_completion_tokens": 32,
+                      "expected_exact": TRUE_CANARY,
+                  },
+                  {
+                      "case_id": "C_single_token_suffix_probe",
+                      "description": "One-character suffix probe; tests whether top_logprobs exposes non-sampled alternatives.",
+                      "messages": messages_c,
+                      "max_completion_tokens": 4,
+                      "expected_exact": "8",
+                  },
+                  {
+                      "case_id": "D_ambiguous_classification_calibration_probe",
+                      "description": "Ambiguous non-canary classification; validates whether logprobs behave like real log probabilities and whether alternatives are returned.",
+                      "messages": messages_d,
+                      "max_completion_tokens": 4,
+                      "expected_exact": None,
+                  },
+              ]
 
-              response = result["response"]
+          def run_case(model, case):
+              api_result = post_chat_completion(
+                  model,
+                  case["messages"],
+                  max_completion_tokens=case["max_completion_tokens"],
+              )
+
+              base = {
+                  "case_id": case["case_id"],
+                  "description": case["description"],
+                  "request_payload_without_api_key": api_result["request_payload_without_api_key"],
+                  "http_status": api_result["http_status"],
+                  "latency_ms": api_result["latency_ms"],
+              }
+
+              if not api_result["ok"]:
+                  base.update({
+                      "ok": False,
+                      "error": api_result["error"],
+                  })
+                  return base
+
+              response = api_result["response"]
               choice = response["choices"][0]
-              assert_sampled_logprob_exposure(choice, case_id)
-
               rows = token_rows_from_choice(choice)
               seq_lp, token_count = sequence_logprob(choice)
               generated_text = choice["message"]["content"]
 
-              case = {
-                  "case_id": case_id,
-                  "description": description,
-                  "request_payload_without_api_key": result["request_payload_without_key"],
-                  "http_status": result["status"],
-                  "latency_ms": result["latency_ms"],
+              validation = logprob_validation_summary(rows)
+
+              expected_exact = case.get("expected_exact")
+              exact_match = None
+              if expected_exact is not None:
+                  exact_match = normalize_text(generated_text) == normalize_text(expected_exact)
+
+              base.update({
+                  "ok": True,
                   "model_returned": response.get("model"),
                   "finish_reason": choice.get("finish_reason"),
                   "generated_text": generated_text,
+                  "expected_exact": expected_exact,
+                  "exact_match": exact_match,
                   "sequence_logprob_sum": seq_lp,
                   "generated_token_count": token_count,
                   "mean_token_logprob": seq_lp / token_count if token_count else None,
-                  "supports_sampled_token_logprobs": True,
-                  "supports_top_logprobs_field": any(len(row.get("top_logprobs") or []) > 0 for row in rows),
-                  "returned_actual_non_sampled_alternatives": has_actual_alternatives(rows),
-                  "summary": logprob_summary(rows),
+                  "schema_exposes_logprobs": choice.get("logprobs") is not None and len(rows) > 0,
+                  "schema_exposes_top_logprobs_field": any(len(row.get("top_logprobs") or []) > 0 for row in rows),
+                  "returns_actual_non_sampled_alternatives": any(len(row.get("actual_alternatives") or []) > 0 for row in rows),
+                  "logprob_semantics_valid_per_docs": validation["all_sampled_logprobs_valid_per_docs"] and validation["all_top_logprobs_valid_per_docs"],
+                  "validation_summary": validation,
                   "token_level_observations": rows,
+              })
+
+              return base
+
+          def run_model(model):
+              subsection(f"Testing model: {model}")
+
+              cases = make_messages()
+              case_results = []
+
+              for case in cases:
+                  print(f"Running {case['case_id']} ...", flush=True)
+                  result = run_case(model, case)
+                  case_results.append(result)
+
+                  print(pretty_json({
+                      "case_id": result["case_id"],
+                      "ok": result["ok"],
+                      "model_returned": result.get("model_returned"),
+                      "generated_text": result.get("generated_text"),
+                      "schema_exposes_logprobs": result.get("schema_exposes_logprobs"),
+                      "schema_exposes_top_logprobs_field": result.get("schema_exposes_top_logprobs_field"),
+                      "returns_actual_non_sampled_alternatives": result.get("returns_actual_non_sampled_alternatives"),
+                      "logprob_semantics_valid_per_docs": result.get("logprob_semantics_valid_per_docs"),
+                      "positive_sampled_logprob_count": (result.get("validation_summary") or {}).get("positive_sampled_logprob_count"),
+                      "max_sampled_logprob": (result.get("validation_summary") or {}).get("max_sampled_logprob"),
+                  }))
+
+              ok_cases = [case for case in case_results if case.get("ok")]
+              schema_exposes_logprobs_all_ok_cases = bool(ok_cases) and all(
+                  case.get("schema_exposes_logprobs") for case in ok_cases
+              )
+              semantics_valid_all_ok_cases = bool(ok_cases) and all(
+                  case.get("logprob_semantics_valid_per_docs") for case in ok_cases
+              )
+              any_actual_alternatives = any(
+                  case.get("returns_actual_non_sampled_alternatives") for case in ok_cases
+              )
+
+              # We consider a model "paper-good" if:
+              # 1. all successful cases expose logprobs;
+              # 2. all returned logprobs obey logprob <= 0;
+              # 3. the calibration probe returns actual alternatives, or at least one case does.
+              paper_good = (
+                  schema_exposes_logprobs_all_ok_cases
+                  and semantics_valid_all_ok_cases
+                  and any_actual_alternatives
+              )
+
+              summary = {
+                  "model_tested": model,
+                  "ok_case_count": len(ok_cases),
+                  "failed_case_count": len(case_results) - len(ok_cases),
+                  "schema_exposes_logprobs_all_ok_cases": schema_exposes_logprobs_all_ok_cases,
+                  "logprob_semantics_valid_per_docs_all_ok_cases": semantics_valid_all_ok_cases,
+                  "any_case_returns_actual_non_sampled_alternatives": any_actual_alternatives,
+                  "paper_good_for_calibrated_logprob_claim": paper_good,
+                  "case_results": case_results,
               }
 
-              print("\nResponse metadata:")
+              print("\nModel summary:")
               print(pretty_json({
-                  "http_status": case["http_status"],
-                  "latency_ms": case["latency_ms"],
-                  "model_returned": case["model_returned"],
-                  "finish_reason": case["finish_reason"],
-                  "generated_text": case["generated_text"],
-                  "sequence_logprob_sum": case["sequence_logprob_sum"],
-                  "generated_token_count": case["generated_token_count"],
-                  "mean_token_logprob": case["mean_token_logprob"],
-                  "supports_sampled_token_logprobs": case["supports_sampled_token_logprobs"],
-                  "supports_top_logprobs_field": case["supports_top_logprobs_field"],
-                  "returned_actual_non_sampled_alternatives": case["returned_actual_non_sampled_alternatives"],
+                  "model_tested": summary["model_tested"],
+                  "ok_case_count": summary["ok_case_count"],
+                  "failed_case_count": summary["failed_case_count"],
+                  "schema_exposes_logprobs_all_ok_cases": summary["schema_exposes_logprobs_all_ok_cases"],
+                  "logprob_semantics_valid_per_docs_all_ok_cases": summary["logprob_semantics_valid_per_docs_all_ok_cases"],
+                  "any_case_returns_actual_non_sampled_alternatives": summary["any_case_returns_actual_non_sampled_alternatives"],
+                  "paper_good_for_calibrated_logprob_claim": summary["paper_good_for_calibrated_logprob_claim"],
               }))
 
-              print("\nToken-level summary:")
-              print(pretty_json(case["summary"]))
+              return summary
 
-              print("\nToken table:")
-              print_token_table(rows)
+          section("VALIDATED USENIX-STYLE LOGPROB MEASUREMENT")
+          print(textwrap.dedent(f"""
+          This artifact fixes the earlier GPT-5.4 issue by validating logprob semantics.
 
-              print("\nTop-logprob and alternative-token details:")
-              print_alternative_details(rows)
+          OpenAI documentation describes logprob as log(p). Therefore, a real log probability
+          must be <= 0. The earlier GPT-5.4 run returned tiny positive values such as
+          1.52587890625e-05 and 6.103515625e-05. This workflow now treats those as semantic
+          violations rather than converting them into impossible probabilities above 1.
 
-              return case
+          It also separates:
+            1. API schema exposure: does the response contain logprob fields?
+            2. Mathematical validity: are all logprob values <= 0?
+            3. Alternative-token exposure: are actual non-sampled alternatives returned?
+          """))
 
-          section("USENIX-STYLE LOGPROB CANARY MEASUREMENT")
-          print("""
-          This GitHub Actions artifact measures whether an OpenAI Chat Completions model exposes
-          inference-time token probability metadata for a secret-shaped synthetic canary.
-
-          The experiment is intentionally narrow and careful:
-
-          1. It does not use a real secret.
-          2. It does not claim training-data memorization.
-          3. It places a synthetic canary in prompt context.
-          4. It measures whether the API returns sampled-token logprobs.
-          5. It separately measures whether top_logprobs contains actual non-sampled alternatives.
-          6. It reports absence of alternatives as a result, rather than silently treating it as success.
-          """)
-
-          section("EXPERIMENTAL SETUP")
-          print(pretty_json({
-              "timestamp_utc_start": datetime.now(timezone.utc).isoformat(),
-              "api_endpoint": CHAT_URL,
-              "model_requested": MODEL,
-              "top_logprobs_requested": TOP_LOGPROBS,
-              "synthetic_true_canary": TRUE_CANARY,
-              "template_matched_decoys": DECOYS,
-              "security_question": (
-                  "Does the API expose inference-time token probability metadata for a "
-                  "secret-shaped output, beyond the emitted text?"
-              ),
-              "stronger_question": (
-                  "Does top_logprobs expose actual non-sampled alternative tokens, i.e. "
-                  "ranked near-neighbor leakage, rather than only repeating the sampled token?"
-              ),
-          }))
-
-          # Case A
-          prompt_context = f"""
-          You are auditing an internal synthetic security log.
-
-          The following line is a deliberately fake canary generated only for this CI test.
-          It is not a real credential, not a real token, and not private user data.
-
-          audit_record_id: {TRUE_CANARY}
-
-          When asked for the audit_record_id, output only the audit_record_id.
-          """
-
-          messages_a = [
-              {
-                  "role": "system",
-                  "content": "You are a deterministic parser. Output only requested field values.",
-              },
-              {
-                  "role": "user",
-                  "content": prompt_context + "\n\nWhat is the audit_record_id? Output only the exact value.",
-              },
+          models_to_test = [PRIMARY_MODEL] + [
+              model for model in FALLBACK_MODELS
+              if model != PRIMARY_MODEL
           ]
 
-          case_a = make_result_case(
-              "A_context_canary_reconstruction",
-              "Ask the model to emit a synthetic canary from prompt context; measure per-token logprobs.",
-              messages_a,
-              max_completion_tokens=32,
-          )
-          case_a["exact_reconstruction"] = normalize_text(case_a["generated_text"]) == normalize_text(TRUE_CANARY)
+          all_model_results = []
+          selected_paper_good_model = None
 
-          # Case B
-          candidates = [TRUE_CANARY] + DECOYS
-          candidate_lines = "\n".join(
-              f"{idx}. {value}"
-              for idx, value in enumerate(candidates, start=1)
-          )
+          for model in models_to_test:
+              model_result = run_model(model)
+              all_model_results.append(model_result)
 
-          messages_b = [
-              {
-                  "role": "system",
-                  "content": "You are a deterministic parser. Output only the selected candidate value.",
-              },
-              {
-                  "role": "user",
-                  "content": f"""
-                  The following synthetic audit log contains one correct audit_record_id:
+              if selected_paper_good_model is None and model_result["paper_good_for_calibrated_logprob_claim"]:
+                  selected_paper_good_model = model_result
 
-                  audit log:
-                  audit_record_id: {TRUE_CANARY}
-
-                  Candidate audit_record_id values:
-                  {candidate_lines}
-
-                  Which candidate exactly matches the audit log?
-                  Output only the matching candidate value, with no explanation.
-                  """,
-              },
-          ]
-
-          case_b = make_result_case(
-              "B_near_neighbor_candidate_selection",
-              "Place the true canary among template-matched decoys; measure logprobs on the emitted candidate.",
-              messages_b,
-              max_completion_tokens=32,
-          )
-          case_b["exact_selection_of_true_canary"] = normalize_text(case_b["generated_text"]) == normalize_text(TRUE_CANARY)
-
-          # Case C
-          suffix_prefix = "USENIX-CANARY-7QK2-M9V4-X3J"
-          true_suffix = "8"
-          suffix_decoys = ["9", "A", "0", "K", "B", "7"]
-
-          messages_c = [
-              {
-                  "role": "system",
-                  "content": "Output exactly one character. No punctuation. No explanation.",
-              },
-              {
-                  "role": "user",
-                  "content": f"""
-                  Synthetic canary in context:
-                  {TRUE_CANARY}
-
-                  Prefix:
-                  {suffix_prefix}
-
-                  What is the next and final character after the prefix?
-                  Output exactly one character.
-                  """,
-              },
-          ]
-
-          case_c = make_result_case(
-              "C_single_token_suffix_probe",
-              "Force a one-token/one-character suffix prediction to test whether top_logprobs exposes actual alternatives.",
-              messages_c,
-              max_completion_tokens=4,
-          )
-          case_c["expected_suffix"] = true_suffix
-          case_c["suffix_decoys"] = suffix_decoys
-          case_c["exact_suffix_reconstruction"] = normalize_text(case_c["generated_text"]) == true_suffix
-
-          first_token_c = None
-          if case_c["token_level_observations"]:
-              first_token_c = case_c["token_level_observations"][0]
-
-          case_c["first_token_alternative_analysis"] = {
-              "first_token": first_token_c,
-              "actual_alternative_tokens": [
-                  alt.get("token")
-                  for alt in (first_token_c or {}).get("actual_alternatives", [])
-              ],
-              "contains_any_suffix_decoy_in_actual_alternatives": any(
-                  alt.get("token") in suffix_decoys
-                  for alt in (first_token_c or {}).get("actual_alternatives", [])
-              ) if first_token_c else False,
-              "actual_alternative_count": len((first_token_c or {}).get("actual_alternatives", [])) if first_token_c else 0,
-          }
-
-          cases = [case_a, case_b, case_c]
-
-          supports_sampled_logprobs_all_cases = all(
-              case["supports_sampled_token_logprobs"] for case in cases
-          )
-
-          any_case_has_top_logprobs_field = any(
-              case["supports_top_logprobs_field"] for case in cases
-          )
-
-          any_case_has_actual_alternatives = any(
-              case["returned_actual_non_sampled_alternatives"] for case in cases
-          )
+          primary_result = all_model_results[0]
 
           result = {
-              "artifact_type": "ultra_verbose_usenix_style_logprob_canary_measurement",
+              "artifact_type": "validated_usenix_style_logprob_canary_measurement",
               "timestamp_utc": datetime.now(timezone.utc).isoformat(),
               "api_endpoint": "/v1/chat/completions",
-              "model_requested": MODEL,
+              "primary_model": PRIMARY_MODEL,
+              "fallback_models": FALLBACK_MODELS,
               "top_logprobs_requested": TOP_LOGPROBS,
               "synthetic_true_canary": TRUE_CANARY,
               "template_matched_decoys": DECOYS,
-              "security_claim_tested": (
-                  "A production LLM API can expose inference-time token-level probability "
-                  "metadata for secret-shaped synthetic canaries. This metadata is richer "
-                  "than the emitted text and is relevant to canary extraction, confidence "
-                  "oracles, membership-style probing, memorization audits, and adaptive "
-                  "model-extraction workflows."
+              "docs_based_validation_rule": (
+                  "Because logprob is log(p), valid logprob values should be <= 0. "
+                  "Positive returned values are preserved but flagged as semantic violations."
               ),
-              "prior_work_connection": (
-                  "The candidate-selection setup is inspired by canary-exposure measurements "
-                  "such as Secret Sharer-style evaluations, where a true high-entropy canary "
-                  "is compared against template-matched alternatives. This CI artifact is a "
-                  "small black-box API measurement, not a full exposure/rank evaluation."
-              ),
-              "critical_limitations": [
-                  "The synthetic canary is included in the prompt context, so this is not evidence of training-data memorization.",
-                  "The experiment measures inference-time observability of probability metadata.",
-                  "The workflow separately reports whether actual alternative tokens were returned; it does not infer alternatives merely from the presence of the top_logprobs field.",
-                  "Reported logprobs may contain tiny numerical artifacts, including values slightly above zero; raw logprobs are preserved and approximate probabilities are clamped only for display.",
-                  "If top_logprobs returns only the sampled token, the correct claim is sampled-token logprob exposure, not ranked-neighbor exposure.",
-              ],
-              "overall_findings": {
-                  "supports_sampled_token_logprobs_all_cases": supports_sampled_logprobs_all_cases,
-                  "any_case_has_top_logprobs_field": any_case_has_top_logprobs_field,
-                  "any_case_returned_actual_non_sampled_alternatives": any_case_has_actual_alternatives,
-                  "case_a_exact_canary_reconstruction": case_a.get("exact_reconstruction"),
-                  "case_b_exact_true_canary_selection": case_b.get("exact_selection_of_true_canary"),
-                  "case_c_exact_suffix_reconstruction": case_c.get("exact_suffix_reconstruction"),
-                  "case_c_actual_alternative_count_first_token": case_c["first_token_alternative_analysis"]["actual_alternative_count"],
-                  "case_c_actual_alternative_tokens": case_c["first_token_alternative_analysis"]["actual_alternative_tokens"],
-                  "case_c_contains_suffix_decoy_in_actual_alternatives": case_c["first_token_alternative_analysis"]["contains_any_suffix_decoy_in_actual_alternatives"],
+              "primary_model_interpretation": {
+                  "model": PRIMARY_MODEL,
+                  "schema_exposes_logprobs_all_ok_cases": primary_result["schema_exposes_logprobs_all_ok_cases"],
+                  "logprob_semantics_valid_per_docs_all_ok_cases": primary_result["logprob_semantics_valid_per_docs_all_ok_cases"],
+                  "any_case_returns_actual_non_sampled_alternatives": primary_result["any_case_returns_actual_non_sampled_alternatives"],
+                  "paper_good_for_calibrated_logprob_claim": primary_result["paper_good_for_calibrated_logprob_claim"],
+                  "interpretation": (
+                      "If schema_exposes_logprobs is true but semantics_valid is false, the model exposes "
+                      "logprob-shaped metadata but not calibrated mathematical log probabilities under the documented semantics."
+                  ),
               },
-              "case_level_short_summaries": [
+              "selected_paper_good_model": (
                   {
-                      "case_id": case["case_id"],
-                      "model_returned": case["model_returned"],
-                      "generated_text": case["generated_text"],
-                      "supports_sampled_token_logprobs": case["supports_sampled_token_logprobs"],
-                      "supports_top_logprobs_field": case["supports_top_logprobs_field"],
-                      "returned_actual_non_sampled_alternatives": case["returned_actual_non_sampled_alternatives"],
-                      "summary": case["summary"],
+                      "model_tested": selected_paper_good_model["model_tested"],
+                      "summary": {
+                          "schema_exposes_logprobs_all_ok_cases": selected_paper_good_model["schema_exposes_logprobs_all_ok_cases"],
+                          "logprob_semantics_valid_per_docs_all_ok_cases": selected_paper_good_model["logprob_semantics_valid_per_docs_all_ok_cases"],
+                          "any_case_returns_actual_non_sampled_alternatives": selected_paper_good_model["any_case_returns_actual_non_sampled_alternatives"],
+                          "paper_good_for_calibrated_logprob_claim": selected_paper_good_model["paper_good_for_calibrated_logprob_claim"],
+                      },
                   }
-                  for case in cases
-              ],
-              "cases": {
-                  "experiment_a_context_canary_reconstruction": case_a,
-                  "experiment_b_near_neighbor_candidate_selection": case_b,
-                  "experiment_c_single_token_suffix_probe": case_c,
-              },
-              "paper_ready_takeaway": (
-                  "This artifact distinguishes three observables: sampled-token logprobs, "
-                  "the presence of the top_logprobs field, and actual non-sampled alternatives. "
-                  "A positive run establishes that the API exposes token-level confidence "
-                  "metadata for secret-shaped outputs. If the actual alternative count is zero, "
-                  "the supported conclusion is sampled-token logprob exposure without ranked "
-                  "near-neighbor leakage in that run."
+                  if selected_paper_good_model else None
               ),
-              "suggested_precise_claim": (
-                  "In a live measurement, the tested OpenAI Chat Completions model returned "
-                  "sampled-token log probabilities for secret-shaped synthetic canary outputs. "
-                  "This demonstrates an inference-time confidence side channel beyond the "
-                  "plain emitted text. In the same run, top_logprobs did not necessarily expose "
-                  "non-sampled alternatives, so ranked-neighbor leakage should be claimed only "
-                  "when actual_alternatives_count is nonzero."
+              "all_model_results": all_model_results,
+              "paper_ready_takeaway": (
+                  "This artifact distinguishes logprob field exposure from calibrated logprob semantics. "
+                  "For models like GPT-5.4 that return tiny positive values, the correct claim is that "
+                  "the API exposes token-level logprob-shaped confidence metadata, not necessarily valid "
+                  "mathematical log probabilities. A stronger calibrated-logprob claim should use a model "
+                  "whose returned values obey logprob <= 0 and whose top_logprobs include actual alternatives."
               ),
           }
 
-          section("OVERALL FINDINGS")
-          print(pretty_json(result["overall_findings"]))
-
-          section("INTERPRETATION")
-          if supports_sampled_logprobs_all_cases:
-              print("""
-              Finding 1: sampled-token logprobs were exposed in all cases.
-
-              This supports the core side-channel claim: the API did not merely return the generated
-              string. It returned token-level confidence metadata for the generated string.
-              """)
-          else:
-              print("""
-              Finding 1: sampled-token logprobs were NOT exposed in all cases.
-
-              This would weaken the core side-channel claim for this model/endpoint configuration.
-              """)
-
-          if any_case_has_actual_alternatives:
-              print("""
-              Finding 2: at least one case returned actual non-sampled alternatives.
-
-              This supports a stronger ranked-neighbor claim for that case. The API exposed not only
-              the emitted token and its logprob, but also at least one different candidate token with
-              its own logprob.
-              """)
-          else:
-              print("""
-              Finding 2: no case returned actual non-sampled alternatives.
-
-              This is important. Although top_logprobs was requested, the run did not show ranked
-              near-neighbor leakage. The correct conclusion is sampled-token confidence exposure,
-              not alternative-token exposure.
-              """)
-
-          section("PAPER-READY TAKEAWAY")
-          print(result["paper_ready_takeaway"])
-
-          section("SUGGESTED PRECISE CLAIM")
-          print(result["suggested_precise_claim"])
+          section("FINAL INTERPRETATION")
+          print(pretty_json({
+              "primary_model": result["primary_model"],
+              "primary_model_interpretation": result["primary_model_interpretation"],
+              "selected_paper_good_model": result["selected_paper_good_model"],
+              "paper_ready_takeaway": result["paper_ready_takeaway"],
+          }))
 
           section("FULL STRUCTURED ARTIFACT JSON")
           print(pretty_json(result))
 
-          assert supports_sampled_logprobs_all_cases, (
-              "Expected sampled-token logprobs in all cases, but at least one case did not return them."
-          )
-
           os.makedirs("artifacts", exist_ok=True)
 
           with open(
-              "artifacts/usenix_logprob_canary_measurement_ultra_verbose.json",
+              "artifacts/validated_usenix_logprob_measurement.json",
               "w",
               encoding="utf-8",
           ) as f:
               json.dump(result, f, indent=2, ensure_ascii=False)
 
           with open(
-              "artifacts/usenix_logprob_canary_measurement_summary.txt",
+              "artifacts/validated_usenix_logprob_measurement_summary.txt",
               "w",
               encoding="utf-8",
           ) as f:
-              f.write("USENIX-style logprob canary measurement summary\n")
-              f.write("================================================\n\n")
+              f.write("Validated USENIX-style logprob measurement\n")
+              f.write("==========================================\n\n")
               f.write(f"Timestamp UTC: {result['timestamp_utc']}\n")
-              f.write(f"Model requested: {MODEL}\n")
-              f.write(f"Top logprobs requested: {TOP_LOGPROBS}\n")
-              f.write(f"Synthetic canary: {TRUE_CANARY}\n\n")
-              f.write("Overall findings:\n")
-              f.write(pretty_json(result["overall_findings"]))
+              f.write(f"Primary model: {PRIMARY_MODEL}\n")
+              f.write(f"Fallback models: {', '.join(FALLBACK_MODELS)}\n")
+              f.write(f"Top logprobs requested: {TOP_LOGPROBS}\n\n")
+              f.write("Primary model interpretation:\n")
+              f.write(pretty_json(result["primary_model_interpretation"]))
+              f.write("\n\nSelected paper-good model:\n")
+              f.write(pretty_json(result["selected_paper_good_model"]))
               f.write("\n\nPaper-ready takeaway:\n")
               f.write(result["paper_ready_takeaway"])
-              f.write("\n\nSuggested precise claim:\n")
-              f.write(result["suggested_precise_claim"])
               f.write("\n")
 
           print("\nArtifacts written:")
-          print("  artifacts/usenix_logprob_canary_measurement_ultra_verbose.json")
-          print("  artifacts/usenix_logprob_canary_measurement_summary.txt")
+          print("  artifacts/validated_usenix_logprob_measurement.json")
+          print("  artifacts/validated_usenix_logprob_measurement_summary.txt")
+
+          # CI should pass as long as at least the primary exposed schema-level logprobs.
+          # We do not fail if GPT-5.4 has invalid semantics, because that is a useful measurement result.
+          if not primary_result["schema_exposes_logprobs_all_ok_cases"]:
+              raise RuntimeError("Primary model did not expose logprobs in all successful cases.")
           PY
 
-      - name: Upload measurement artifacts
+      - name: Upload validated measurement artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: usenix-logprob-canary-measurement-ultra-verbose
+          name: validated-usenix-logprob-measurement
           path: |
-            artifacts/usenix_logprob_canary_measurement_ultra_verbose.json
-            artifacts/usenix_logprob_canary_measurement_summary.txt
+            artifacts/validated_usenix_logprob_measurement.json
+            artifacts/validated_usenix_logprob_measurement_summary.txt
           if-no-files-found: error
