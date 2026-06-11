@@ -1,61 +1,61 @@
 {
-  "timestamp_utc": "2026-06-11T08:54:33.767412+00:00",
+  "timestamp_utc": "2026-06-11T08:55:56.087429+00:00",
   "date": "2026-06-11",
   "results": [
     {
       "model": "gpt-4.1",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1488.11,
+      "latency_ms": 1418.17,
       "error": null
     },
     {
       "model": "gpt-4.1-mini",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 628.28,
+      "latency_ms": 1528.44,
       "error": null
     },
     {
       "model": "gpt-4.1-nano",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1037.05,
+      "latency_ms": 735.24,
       "error": null
     },
     {
       "model": "gpt-4o",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 653.44,
+      "latency_ms": 864.02,
       "error": null
     },
     {
       "model": "gpt-4o-mini",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 454.61,
+      "latency_ms": 920.18,
       "error": null
     },
     {
       "model": "o3",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 300.15,
+      "latency_ms": 321.97,
       "error": "{\n    \"error\": {\n        \"message\": \"You are not allowed to request logprobs from this model\",\n        \"type\": \"invalid_request_error\",\n        \"param\": null,\n        \"code\": null\n    }\n}\n"
     },
     {
       "model": "o3-mini",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 82.15,
+      "latency_ms": 345.95,
       "error": "{\n    \"error\": {\n        \"message\": \"You are not allowed to request logprobs from this model\",\n        \"type\": \"invalid_request_error\",\n        \"param\": null,\n        \"code\": null\n    }\n}\n"
     },
     {
       "model": "o4-mini",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 101.2,
+      "latency_ms": 102.08,
       "error": "{\n    \"error\": {\n        \"message\": \"You are not allowed to request logprobs from this model\",\n        \"type\": \"invalid_request_error\",\n        \"param\": null,\n        \"code\": null\n    }\n}\n"
     }
   ]
