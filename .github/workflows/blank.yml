@@ -113,9 +113,9 @@ jobs:
           timestamp = now.isoformat()
 
           results = [post_chat(model) for model in models_to_test]
+          supported = [r for r in results if r["supports_logprobs"]]
 
-          archive_dir = Path("docs/archive")
-          archive_dir.mkdir(parents=True, exist_ok=True)
+          Path("docs/archive").mkdir(parents=True, exist_ok=True)
 
           snapshot = {
               "timestamp_utc": timestamp,
@@ -123,32 +123,29 @@ jobs:
               "results": results,
           }
 
-          Path("docs").mkdir(parents=True, exist_ok=True)
+          Path(f"docs/archive/{date}.json").write_text(
+              json.dumps(snapshot, indent=2),
+              encoding="utf-8",
+          )
 
-          archive_file = archive_dir / f"{date}.json"
-          archive_file.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-
-          latest_file = Path("docs/latest.json")
-          latest_file.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-
-          supported = [r for r in results if r["supports_logprobs"]]
+          Path("docs/latest.json").write_text(
+              json.dumps(snapshot, indent=2),
+              encoding="utf-8",
+          )
 
           rows = ""
 
           for r in results:
               cls = "yes" if r["supports_logprobs"] else "no"
               label = "Yes" if r["supports_logprobs"] else "No"
-              model = html.escape(str(r["model"]))
-              status = html.escape(str(r["http_status"]))
-              latency = html.escape(str(r["latency_ms"]))
 
               rows += f"""
-                <tr>
-                  <td>{model}</td>
-                  <td class="{cls}">{label}</td>
-                  <td>{status}</td>
-                  <td>{latency}</td>
-                </tr>
+              <tr>
+                <td>{html.escape(str(r["model"]))}</td>
+                <td class="{cls}">{label}</td>
+                <td>{html.escape(str(r["http_status"]))}</td>
+                <td>{html.escape(str(r["latency_ms"]))}</td>
+              </tr>
               """
 
           page = f"""<!doctype html>
