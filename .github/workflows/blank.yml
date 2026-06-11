@@ -27,11 +27,17 @@ jobs:
       - name: Check OpenAI model logprobs support
         run: |
           python <<'PY'
-          import json, os, time, urllib.request, urllib.error
+          import json
+          import os
+          import time
+          import html
+          import urllib.request
+          import urllib.error
           from datetime import datetime, timezone
           from pathlib import Path
 
           api_key = os.environ["OPENAI_API_KEY"]
+
           headers = {
               "Authorization": f"Bearer {api_key}",
               "Content-Type": "application/json",
@@ -51,7 +57,9 @@ jobs:
           def post_chat(model):
               payload = {
                   "model": model,
-                  "messages": [{"role": "user", "content": "Say exactly: yes"}],
+                  "messages": [
+                      {"role": "user", "content": "Say exactly: yes"}
+                  ],
                   "max_completion_tokens": 3,
                   "logprobs": True,
                   "top_logprobs": 5,
@@ -59,25 +67,30 @@ jobs:
 
               req = urllib.request.Request(
                   "https://api.openai.com/v1/chat/completions",
-                  data=json.dumps(payload).encode(),
+                  data=json.dumps(payload).encode("utf-8"),
                   headers=headers,
                   method="POST",
               )
 
               start = time.perf_counter()
+
               try:
-                  with urllib.request.urlopen(req, timeout=60) as r:
-                      body = json.loads(r.read().decode())
-                      lp = body["choices"][0].get("logprobs")
+                  with urllib.request.urlopen(req, timeout=60) as response:
+                      body = json.loads(response.read().decode("utf-8"))
+                      logprobs = body["choices"][0].get("logprobs")
+                      content_logprobs = (logprobs or {}).get("content") or []
+
                       return {
                           "model": model,
-                          "supports_logprobs": bool(lp and lp.get("content")),
-                          "http_status": r.status,
+                          "supports_logprobs": len(content_logprobs) > 0,
+                          "http_status": response.status,
                           "latency_ms": round((time.perf_counter() - start) * 1000, 2),
                           "error": None,
                       }
+
               except urllib.error.HTTPError as e:
-                  raw = e.read().decode(errors="replace")
+                  raw = e.read().decode("utf-8", errors="replace")
+
                   return {
                       "model": model,
                       "supports_logprobs": False,
@@ -86,11 +99,20 @@ jobs:
                       "error": raw[:1000],
                   }
 
+              except Exception as e:
+                  return {
+                      "model": model,
+                      "supports_logprobs": False,
+                      "http_status": None,
+                      "latency_ms": round((time.perf_counter() - start) * 1000, 2),
+                      "error": str(e),
+                  }
+
           now = datetime.now(timezone.utc)
           date = now.strftime("%Y-%m-%d")
           timestamp = now.isoformat()
 
-          results = [post_chat(m) for m in models_to_test]
+          results = [post_chat(model) for model in models_to_test]
 
           archive_dir = Path("docs/archive")
           archive_dir.mkdir(parents=True, exist_ok=True)
@@ -101,34 +123,72 @@ jobs:
               "results": results,
           }
 
+          Path("docs").mkdir(parents=True, exist_ok=True)
+
           archive_file = archive_dir / f"{date}.json"
           archive_file.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
 
           latest_file = Path("docs/latest.json")
-          latest_file.parent.mkdir(parents=True, exist_ok=True)
           latest_file.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
 
           supported = [r for r in results if r["supports_logprobs"]]
-          unsupported = [r for r in results if not r["supports_logprobs"]]
 
-          html = f"""<!doctype html>
+          rows = ""
+
+          for r in results:
+              cls = "yes" if r["supports_logprobs"] else "no"
+              label = "Yes" if r["supports_logprobs"] else "No"
+              model = html.escape(str(r["model"]))
+              status = html.escape(str(r["http_status"]))
+              latency = html.escape(str(r["latency_ms"]))
+
+              rows += f"""
+                <tr>
+                  <td>{model}</td>
+                  <td class="{cls}">{label}</td>
+                  <td>{status}</td>
+                  <td>{latency}</td>
+                </tr>
+              """
+
+          page = f"""<!doctype html>
           <html>
           <head>
             <meta charset="utf-8">
             <title>OpenAI Logprobs Support Stats</title>
             <style>
-              body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; }}
-              table {{ border-collapse: collapse; width: 100%; }}
-              th, td {{ border: 1px solid #ddd; padding: 8px; }}
-              th {{ background: #f3f3f3; text-align: left; }}
-              .yes {{ color: green; font-weight: bold; }}
-              .no {{ color: red; font-weight: bold; }}
+              body {{
+                font-family: system-ui, sans-serif;
+                max-width: 900px;
+                margin: 40px auto;
+                padding: 0 20px;
+              }}
+              table {{
+                border-collapse: collapse;
+                width: 100%;
+              }}
+              th, td {{
+                border: 1px solid #ddd;
+                padding: 8px;
+              }}
+              th {{
+                background: #f3f3f3;
+                text-align: left;
+              }}
+              .yes {{
+                color: green;
+                font-weight: bold;
+              }}
+              .no {{
+                color: red;
+                font-weight: bold;
+              }}
             </style>
           </head>
           <body>
             <h1>OpenAI Logprobs Support Stats</h1>
-            <p>Last updated: {timestamp}</p>
-            <p>Supporting models: {len supported} / {len results}</p>
+            <p>Last updated: {html.escape(timestamp)}</p>
+            <p>Supporting models: {len(supported)} / {len(results)}</p>
 
             <table>
               <tr>
@@ -137,21 +197,7 @@ jobs:
                 <th>HTTP status</th>
                 <th>Latency ms</th>
               </tr>
-          """
-
-          for r in results:
-              cls = "yes" if r["supports_logprobs"] else "no"
-              label = "Yes" if r["supports_logprobs"] else "No"
-              html += f"""
-              <tr>
-                <td>{r["model"]}</td>
-                <td class="{cls}">{label}</td>
-                <td>{r["http_status"]}</td>
-                <td>{r["latency_ms"]}</td>
-              </tr>
-              """
-
-          html += """
+              {rows}
             </table>
 
             <h2>Archive</h2>
@@ -161,7 +207,7 @@ jobs:
           </html>
           """
 
-          Path("docs/index.html").write_text(html, encoding="utf-8")
+          Path("docs/index.html").write_text(page, encoding="utf-8")
           PY
 
       - name: Commit archive and webpage
