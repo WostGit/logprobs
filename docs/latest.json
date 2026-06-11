@@ -1,0 +1,62 @@
+{
+  "timestamp_utc": "2026-06-11T08:54:33.767412+00:00",
+  "date": "2026-06-11",
+  "results": [
+    {
+      "model": "gpt-4.1",
+      "supports_logprobs": true,
+      "http_status": 200,
+      "latency_ms": 1488.11,
+      "error": null
+    },
+    {
+      "model": "gpt-4.1-mini",
+      "supports_logprobs": true,
+      "http_status": 200,
+      "latency_ms": 628.28,
+      "error": null
+    },
+    {
+      "model": "gpt-4.1-nano",
+      "supports_logprobs": true,
+      "http_status": 200,
+      "latency_ms": 1037.05,
+      "error": null
+    },
+    {
+      "model": "gpt-4o",
+      "supports_logprobs": true,
+      "http_status": 200,
+      "latency_ms": 653.44,
+      "error": null
+    },
+    {
+      "model": "gpt-4o-mini",
+      "supports_logprobs": true,
+      "http_status": 200,
+      "latency_ms": 454.61,
+      "error": null
+    },
+    {
+      "model": "o3",
+      "supports_logprobs": false,
+      "http_status": 403,
+      "latency_ms": 300.15,
+      "error": "{\n    \"error\": {\n        \"message\": \"You are not allowed to request logprobs from this model\",\n        \"type\": \"invalid_request_error\",\n        \"param\": null,\n        \"code\": null\n    }\n}\n"
+    },
+    {
+      "model": "o3-mini",
+      "supports_logprobs": false,
+      "http_status": 403,
+      "latency_ms": 82.15,
+      "error": "{\n    \"error\": {\n        \"message\": \"You are not allowed to request logprobs from this model\",\n        \"type\": \"invalid_request_error\",\n        \"param\": null,\n        \"code\": null\n    }\n}\n"
+    },
+    {
+      "model": "o4-mini",
+      "supports_logprobs": false,
+      "http_status": 403,
+      "latency_ms": 101.2,
+      "error": "{\n    \"error\": {\n        \"message\": \"You are not allowed to request logprobs from this model\",\n        \"type\": \"invalid_request_error\",\n        \"param\": null,\n        \"code\": null\n    }\n}\n"
+    }
+  ]
+}
