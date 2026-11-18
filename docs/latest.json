@@ -1,10 +1,10 @@
 {
-  "timestamp_utc": "2026-11-16T14:36:30.087612+00:00",
-  "date": "2026-11-16",
-  "total_models_seen": 96,
-  "tested_models_count": 47,
+  "timestamp_utc": "2026-11-18T14:59:22.746804+00:00",
+  "date": "2026-11-18",
+  "total_models_seen": 98,
+  "tested_models_count": 49,
   "supported_count": 15,
-  "unsupported_count": 32,
+  "unsupported_count": 34,
   "all_model_ids_seen": [
     "chat-latest",
     "chatgpt-image-latest",
@@ -62,6 +62,8 @@
     "gpt-6-sol",
     "gpt-6.1-sol",
     "gpt-6.1-terra",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
     "gpt-audio",
     "gpt-audio-1.5",
     "gpt-audio-2025-08-28",
@@ -148,6 +150,8 @@
     "gpt-6-sol",
     "gpt-6.1-sol",
     "gpt-6.1-terra",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
     "gpt-live-1",
     "o3",
     "o3-2025-04-16"
@@ -157,7 +161,7 @@
       "model": "gpt-4.1",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1864.52,
+      "latency_ms": 1931.32,
       "model_returned": "gpt-4.1-2025-04-14",
       "error_type": null,
       "error_message": null
@@ -166,7 +170,7 @@
       "model": "gpt-4.1-2025-04-14",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1075.85,
+      "latency_ms": 915.38,
       "model_returned": "gpt-4.1-2025-04-14",
       "error_type": null,
       "error_message": null
@@ -175,7 +179,7 @@
       "model": "gpt-4.1-mini",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1009.26,
+      "latency_ms": 805.73,
       "model_returned": "gpt-4.1-mini-2025-04-14",
       "error_type": null,
       "error_message": null
@@ -184,7 +188,7 @@
       "model": "gpt-4.1-mini-2025-04-14",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 859.63,
+      "latency_ms": 521.96,
       "model_returned": "gpt-4.1-mini-2025-04-14",
       "error_type": null,
       "error_message": null
@@ -193,7 +197,7 @@
       "model": "gpt-4o",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 701.03,
+      "latency_ms": 729.2,
       "model_returned": "gpt-4o-2024-08-06",
       "error_type": null,
       "error_message": null
@@ -202,7 +206,7 @@
       "model": "gpt-4o-2024-08-06",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1025.38,
+      "latency_ms": 601.18,
       "model_returned": "gpt-4o-2024-08-06",
       "error_type": null,
       "error_message": null
@@ -211,7 +215,7 @@
       "model": "gpt-4o-2024-11-20",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 545.41,
+      "latency_ms": 515.38,
       "model_returned": "gpt-4o-2024-11-20",
       "error_type": null,
       "error_message": null
@@ -220,7 +224,7 @@
       "model": "gpt-4o-mini",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 1156.21,
+      "latency_ms": 675.63,
       "model_returned": "gpt-4o-mini-2024-07-18",
       "error_type": null,
       "error_message": null
@@ -229,7 +233,7 @@
       "model": "gpt-4o-mini-2024-07-18",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 559.67,
+      "latency_ms": 758.5,
       "model_returned": "gpt-4o-mini-2024-07-18",
       "error_type": null,
       "error_message": null
@@ -238,7 +242,7 @@
       "model": "gpt-5",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 88.04,
+      "latency_ms": 79.71,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -247,7 +251,7 @@
       "model": "gpt-5-2025-08-07",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 209.32,
+      "latency_ms": 91.88,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -256,7 +260,7 @@
       "model": "gpt-5-mini",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 86.14,
+      "latency_ms": 84.21,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -265,7 +269,7 @@
       "model": "gpt-5-mini-2025-08-07",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 347.11,
+      "latency_ms": 95.8,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -274,7 +278,7 @@
       "model": "gpt-5-nano",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 87.03,
+      "latency_ms": 84.31,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -283,7 +287,7 @@
       "model": "gpt-5-nano-2025-08-07",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 102.63,
+      "latency_ms": 77.62,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -292,7 +296,7 @@
       "model": "gpt-5-pro",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 84.22,
+      "latency_ms": 86.72,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -301,7 +305,7 @@
       "model": "gpt-5-pro-2025-10-06",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 82.92,
+      "latency_ms": 100.49,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -310,7 +314,7 @@
       "model": "gpt-5.1",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 527.55,
+      "latency_ms": 1049.2,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens."
@@ -319,7 +323,7 @@
       "model": "gpt-5.1-2025-11-13",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 525.29,
+      "latency_ms": 779.26,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Could not finish the message because max_tokens or model output limit was reached. Please try again with higher max_tokens."
@@ -328,7 +332,7 @@
       "model": "gpt-5.2",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 566.13,
+      "latency_ms": 729.22,
       "model_returned": "gpt-5.2-2025-12-11",
       "error_type": null,
       "error_message": null
@@ -337,7 +341,7 @@
       "model": "gpt-5.2-2025-12-11",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 579.3,
+      "latency_ms": 937.34,
       "model_returned": "gpt-5.2-2025-12-11",
       "error_type": null,
       "error_message": null
@@ -346,7 +350,7 @@
       "model": "gpt-5.2-pro",
       "supports_logprobs": false,
       "http_status": 404,
-      "latency_ms": 154.61,
+      "latency_ms": 306.56,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "This is not a chat model and thus not supported in the v1/chat/completions endpoint. Did you mean to use v1/completions?"
@@ -355,7 +359,7 @@
       "model": "gpt-5.2-pro-2025-12-11",
       "supports_logprobs": false,
       "http_status": 404,
-      "latency_ms": 171.46,
+      "latency_ms": 115.04,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "This is not a chat model and thus not supported in the v1/chat/completions endpoint. Did you mean to use v1/completions?"
@@ -364,7 +368,7 @@
       "model": "gpt-5.3-codex",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 92.11,
+      "latency_ms": 89.4,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -373,7 +377,7 @@
       "model": "gpt-5.4",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 3022.07,
+      "latency_ms": 871.09,
       "model_returned": "gpt-5.4-2026-03-05",
       "error_type": null,
       "error_message": null
@@ -382,7 +386,7 @@
       "model": "gpt-5.4-2026-03-05",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 119.1,
+      "latency_ms": 91.08,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -391,7 +395,7 @@
       "model": "gpt-5.4-mini",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 636.37,
+      "latency_ms": 1397.92,
       "model_returned": "gpt-5.4-mini-2026-03-17",
       "error_type": null,
       "error_message": null
@@ -400,7 +404,7 @@
       "model": "gpt-5.4-mini-2026-03-17",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 288.35,
+      "latency_ms": 103.54,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -409,7 +413,7 @@
       "model": "gpt-5.4-nano",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 577.44,
+      "latency_ms": 480.22,
       "model_returned": "gpt-5.4-nano-2026-03-17",
       "error_type": null,
       "error_message": null
@@ -418,7 +422,7 @@
       "model": "gpt-5.4-nano-2026-03-17",
       "supports_logprobs": true,
       "http_status": 200,
-      "latency_ms": 695.23,
+      "latency_ms": 569.48,
       "model_returned": "gpt-5.4-nano-2026-03-17",
       "error_type": null,
       "error_message": null
@@ -427,7 +431,7 @@
       "model": "gpt-5.4-pro",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 82.86,
+      "latency_ms": 97.55,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -436,7 +440,7 @@
       "model": "gpt-5.4-pro-2026-03-05",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 91.13,
+      "latency_ms": 85.81,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -445,7 +449,7 @@
       "model": "gpt-5.5",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 149.13,
+      "latency_ms": 103.76,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'logprobs' is not supported with this model."
@@ -454,7 +458,7 @@
       "model": "gpt-5.5-2026-04-23",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 435.93,
+      "latency_ms": 235.4,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'logprobs' is not supported with this model."
@@ -463,7 +467,7 @@
       "model": "gpt-5.5-pro",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 90.01,
+      "latency_ms": 84.72,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -472,7 +476,7 @@
       "model": "gpt-5.5-pro-2026-04-23",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 89.55,
+      "latency_ms": 113.69,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -481,7 +485,7 @@
       "model": "gpt-5.6-luna",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 131.62,
+      "latency_ms": 136.58,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'logprobs' is not supported with this model."
@@ -490,7 +494,7 @@
       "model": "gpt-5.6-sol",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 134.56,
+      "latency_ms": 116.88,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'logprobs' is not supported with this model."
@@ -499,7 +503,7 @@
       "model": "gpt-5.6-terra",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 170.76,
+      "latency_ms": 129.62,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'logprobs' is not supported with this model."
@@ -508,7 +512,7 @@
       "model": "gpt-6-astra",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 126.47,
+      "latency_ms": 135.83,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
@@ -517,7 +521,7 @@
       "model": "gpt-6-luna",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 126.96,
+      "latency_ms": 146.89,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
@@ -526,7 +530,7 @@
       "model": "gpt-6-sol",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 155.95,
+      "latency_ms": 107.69,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
@@ -535,7 +539,7 @@
       "model": "gpt-6.1-sol",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 267.22,
+      "latency_ms": 144.26,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
@@ -544,7 +548,25 @@
       "model": "gpt-6.1-terra",
       "supports_logprobs": false,
       "http_status": 400,
-      "latency_ms": 127.76,
+      "latency_ms": 982.54,
+      "model_returned": null,
+      "error_type": "invalid_request_error",
+      "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+    },
+    {
+      "model": "gpt-6.2-astra",
+      "supports_logprobs": false,
+      "http_status": 400,
+      "latency_ms": 171.35,
+      "model_returned": null,
+      "error_type": "invalid_request_error",
+      "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+    },
+    {
+      "model": "gpt-6.2-sol",
+      "supports_logprobs": false,
+      "http_status": 400,
+      "latency_ms": 191.37,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
@@ -553,7 +575,7 @@
       "model": "gpt-live-1",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 103.07,
+      "latency_ms": 104.61,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -562,7 +584,7 @@
       "model": "o3",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 88.53,
+      "latency_ms": 91.65,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
@@ -571,7 +593,7 @@
       "model": "o3-2025-04-16",
       "supports_logprobs": false,
       "http_status": 403,
-      "latency_ms": 118.97,
+      "latency_ms": 102.77,
       "model_returned": null,
       "error_type": "invalid_request_error",
       "error_message": "You are not allowed to request logprobs from this model"
